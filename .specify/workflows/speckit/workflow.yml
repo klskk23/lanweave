@@ -21,9 +21,6 @@ requires:
     # core commands referenced in ``steps``.
     any:
       - "claude"
-      - "copilot"
-      - "gemini"
-      - "opencode"
 
 inputs:
   spec:
