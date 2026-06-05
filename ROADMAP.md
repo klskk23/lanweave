@@ -15,7 +15,7 @@
 | 002 | invites-and-user-auth ✅                 | 服务端     | 001        | 邀请码 → 注册 → 登录 → JWT          |
 | 003 | wireguard-server-interface ✅            | 服务端     | 001        | wg 接口 up，nft 空 table 就绪        |
 | 004 | node-registration-and-ipam ✅           | 服务端     | 002, 003   | 用户注册 node → 拿到 IP → WG peer 在 |
-| 005 | zones-and-nftables-isolation            | 服务端     | 004        | 同 zone 互通，跨 zone drop          |
+| 005 | zones-and-nftables-isolation ✅         | 服务端     | 004        | 同 zone 互通，跨 zone drop          |
 | 006 | zone-owner-controls                     | 服务端     | 005        | owner 改密 / 踢人 / 删 zone 生效     |
 | 007 | node-online-status                      | 服务端     | 004        | 客户端连接 → online，3min 静默 → offline |
 | 008 | cascade-deletes                         | 服务端     | 005        | admin 删用户 → 所有 state 清干净     |
