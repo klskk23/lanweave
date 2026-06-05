@@ -30,6 +30,14 @@ var (
 	ErrPubKeyTaken   = errors.New("device key already registered")
 	ErrPoolExhausted = errors.New("no addresses available")
 	ErrServer        = errors.New("server error")
+
+	// Zone/session errors (feature 011).
+	ErrSessionExpired = errors.New("session expired")
+	ErrZoneNameTaken  = errors.New("zone name already taken")
+	ErrZoneOrPassword = errors.New("invalid zone or password")
+	ErrNotOwner       = errors.New("only the zone owner can do that")
+	ErrNotMember      = errors.New("not a member of that zone")
+	ErrZoneNotFound   = errors.New("zone not found")
 )
 
 // Option configures a Client.
@@ -116,6 +124,67 @@ func (c *Client) ServerInfo() (protocol.ServerInfoResponse, error) {
 	return resp, err
 }
 
+// SetToken sets the bearer token (e.g. a session restored from the secure store).
+func (c *Client) SetToken(token string) { c.token = token }
+
+// Me returns the signed-in user; used to validate a cached session.
+func (c *Client) Me() (protocol.MeResponse, error) {
+	var resp protocol.MeResponse
+	_, err := c.do(http.MethodGet, "/api/v1/me", true, nil, &resp)
+	return resp, err
+}
+
+// CreateZone creates a password-protected zone owned by the caller.
+func (c *Client) CreateZone(name, password string) (protocol.ZoneResponse, error) {
+	var resp protocol.ZoneResponse
+	_, err := c.do(http.MethodPost, "/api/v1/zones", true, protocol.CreateZoneRequest{Name: name, Password: password}, &resp)
+	return resp, err
+}
+
+// ListZones returns the zones the caller participates in (with is_owner).
+func (c *Client) ListZones() (protocol.ZoneListResponse, error) {
+	var resp protocol.ZoneListResponse
+	_, err := c.do(http.MethodGet, "/api/v1/zones", true, nil, &resp)
+	return resp, err
+}
+
+// JoinZone admits one of the caller's devices to a zone by name + password.
+func (c *Client) JoinZone(name string, nodeID int64, password string) error {
+	_, err := c.do(http.MethodPost, "/api/v1/zones/"+url.PathEscape(name)+"/join", true, protocol.JoinZoneRequest{NodeID: nodeID, Password: password}, nil)
+	return err
+}
+
+// LeaveZone removes one of the caller's devices from a zone.
+func (c *Client) LeaveZone(name string, nodeID int64) error {
+	_, err := c.do(http.MethodPost, "/api/v1/zones/"+url.PathEscape(name)+"/leave", true, protocol.LeaveZoneRequest{NodeID: nodeID}, nil)
+	return err
+}
+
+// ZoneMembers lists a zone's members (name, owner, address, and node id).
+func (c *Client) ZoneMembers(name string) (protocol.ZoneMembersResponse, error) {
+	var resp protocol.ZoneMembersResponse
+	_, err := c.do(http.MethodGet, "/api/v1/zones/"+url.PathEscape(name)+"/members", true, nil, &resp)
+	return resp, err
+}
+
+// ChangeZonePassword rotates a zone's password (owner only).
+func (c *Client) ChangeZonePassword(name, password string) error {
+	_, err := c.do(http.MethodPatch, "/api/v1/zones/"+url.PathEscape(name), true, protocol.ChangeZonePasswordRequest{Password: password}, nil)
+	return err
+}
+
+// DeleteZone deletes a zone (owner only).
+func (c *Client) DeleteZone(name string) error {
+	_, err := c.do(http.MethodDelete, "/api/v1/zones/"+url.PathEscape(name), true, nil, nil)
+	return err
+}
+
+// KickMember removes a member device from a zone by node id (owner only).
+func (c *Client) KickMember(name string, nodeID int64) error {
+	_, err := c.do(http.MethodDelete, fmt.Sprintf("/api/v1/zones/%s/members/%d", url.PathEscape(name), nodeID), true, nil, nil)
+	return err
+}
+
 // do performs a request, decoding into out (when non-nil) and mapping failures to typed
 // errors based on the HTTP status and the error envelope's code.
 func (c *Client) do(method, path string, auth bool, body, out any) (int, error) {
@@ -167,12 +236,13 @@ func (c *Client) do(method, path string, auth bool, body, out any) (int, error) 
 		}
 		return resp.StatusCode, nil
 	}
-	return resp.StatusCode, c.mapError(path, resp)
+	return resp.StatusCode, c.mapError(path, auth, resp)
 }
 
 // mapError turns a non-2xx response into a typed error using the status and the error
-// envelope's code.
-func (c *Client) mapError(path string, resp *http.Response) error {
+// envelope's code. `auth` distinguishes a 401 on an authenticated call (session expired)
+// from a 401 on sign-in (bad credentials).
+func (c *Client) mapError(path string, auth bool, resp *http.Response) error {
 	var env protocol.ErrorResponse
 	if b, _ := io.ReadAll(resp.Body); len(b) > 0 {
 		_ = json.Unmarshal(b, &env)
@@ -184,10 +254,24 @@ func (c *Client) mapError(path string, resp *http.Response) error {
 		return ErrPubKeyTaken
 	case "pool_exhausted":
 		return ErrPoolExhausted
+	case "zone_name_taken":
+		return ErrZoneNameTaken
+	case "invalid_zone_or_password":
+		return ErrZoneOrPassword
+	case "forbidden":
+		return ErrNotOwner
 	}
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
+		if auth {
+			return ErrSessionExpired
+		}
 		return ErrAuthFailed
+	case http.StatusNotFound:
+		if strings.Contains(path, "/leave") || strings.Contains(path, "/members/") {
+			return ErrNotMember
+		}
+		return ErrZoneNotFound
 	case http.StatusConflict:
 		// Account creation conflicts: a taken username vs an already-used invite.
 		if path == "/api/v1/register" {

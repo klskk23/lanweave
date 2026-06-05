@@ -217,7 +217,7 @@ func (h *handlers) zoneMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]protocol.ZoneMemberResponse, 0, len(members))
 	for _, m := range members {
-		items = append(items, protocol.ZoneMemberResponse{NodeName: m.NodeName, IP: m.IP.String(), Owner: m.OwnerName})
+		items = append(items, protocol.ZoneMemberResponse{NodeID: m.NodeID, NodeName: m.NodeName, IP: m.IP.String(), Owner: m.OwnerName})
 	}
 	writeJSON(w, http.StatusOK, protocol.ZoneMembersResponse{Members: items})
 }

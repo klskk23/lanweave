@@ -33,6 +33,7 @@ type ZoneWithOwnership struct {
 
 // ZoneMember is one member node of a zone (with its owning username).
 type ZoneMember struct {
+	NodeID    int64
 	NodeName  string
 	IP        netip.Addr
 	OwnerName string
@@ -130,7 +131,7 @@ func (r *ZoneRepo) Leave(ctx context.Context, zoneID, nodeID int64) error {
 // MembersByZone returns every member node with its name, address, and owning username.
 func (r *ZoneRepo) MembersByZone(ctx context.Context, zoneID int64) ([]ZoneMember, error) {
 	const q = `
-SELECT n.name, n.ip, u.username
+SELECT n.id, n.name, n.ip, u.username
 FROM zone_members zm
 JOIN nodes n ON n.id = zm.node_id
 JOIN users u ON u.id = n.user_id
@@ -147,7 +148,7 @@ ORDER BY n.ip`
 			m     ZoneMember
 			ipVal int64
 		)
-		if err := rows.Scan(&m.NodeName, &ipVal, &m.OwnerName); err != nil {
+		if err := rows.Scan(&m.NodeID, &m.NodeName, &ipVal, &m.OwnerName); err != nil {
 			return nil, fmt.Errorf("scan member: %w", err)
 		}
 		m.IP = ipam.Uint32ToAddr(uint32(ipVal))

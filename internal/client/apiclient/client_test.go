@@ -110,6 +110,45 @@ func TestClientHappyAndErrorMapping(t *testing.T) {
 	}
 }
 
+// TestZoneErrorMapping covers the feature-011 zone/session error mapping.
+func TestZoneErrorMapping(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		protocol.WriteJSONError(w, http.StatusUnauthorized, "unauthorized", "expired")
+	})
+	mux.HandleFunc("POST /api/v1/zones", func(w http.ResponseWriter, _ *http.Request) {
+		protocol.WriteJSONError(w, http.StatusConflict, "zone_name_taken", "taken")
+	})
+	mux.HandleFunc("POST /api/v1/zones/{name}/join", func(w http.ResponseWriter, _ *http.Request) {
+		protocol.WriteJSONError(w, http.StatusForbidden, "invalid_zone_or_password", "Invalid zone or password.")
+	})
+	mux.HandleFunc("PATCH /api/v1/zones/{name}", func(w http.ResponseWriter, _ *http.Request) {
+		protocol.WriteJSONError(w, http.StatusForbidden, "forbidden", "Only the zone owner...")
+	})
+	mux.HandleFunc("POST /api/v1/zones/{name}/leave", func(w http.ResponseWriter, _ *http.Request) {
+		protocol.WriteJSONError(w, http.StatusNotFound, "not_found", "Not found.")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := apiclient.New(srv.URL)
+
+	if _, err := c.Me(); !errors.Is(err, apiclient.ErrSessionExpired) {
+		t.Errorf("me 401: got %v, want ErrSessionExpired", err)
+	}
+	if _, err := c.CreateZone("dup", "pw"); !errors.Is(err, apiclient.ErrZoneNameTaken) {
+		t.Errorf("create dup: got %v, want ErrZoneNameTaken", err)
+	}
+	if err := c.JoinZone("z", 1, "bad"); !errors.Is(err, apiclient.ErrZoneOrPassword) {
+		t.Errorf("join wrong pw: got %v, want ErrZoneOrPassword", err)
+	}
+	if err := c.ChangeZonePassword("z", "newpassword"); !errors.Is(err, apiclient.ErrNotOwner) {
+		t.Errorf("non-owner change: got %v, want ErrNotOwner", err)
+	}
+	if err := c.LeaveZone("z", 1); !errors.Is(err, apiclient.ErrNotMember) {
+		t.Errorf("leave not-member: got %v, want ErrNotMember", err)
+	}
+}
+
 func TestUnreachable(t *testing.T) {
 	c := apiclient.New("https://127.0.0.1:1") // nothing listening
 	if err := c.Login("a", "b"); !errors.Is(err, apiclient.ErrUnreachable) {

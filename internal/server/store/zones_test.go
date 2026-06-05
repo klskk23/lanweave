@@ -89,11 +89,17 @@ func TestZoneMembersTransparency(t *testing.T) {
 		t.Fatalf("expected 2 members, got %d", len(members))
 	}
 	owners := map[string]string{} // node name -> owner
+	ids := map[string]int64{}     // node name -> node id
 	for _, m := range members {
 		owners[m.NodeName] = m.OwnerName
+		ids[m.NodeName] = m.NodeID
 	}
 	if owners["a"] != "alice" || owners["b"] != "bob" {
 		t.Errorf("cross-user transparency wrong: %+v", owners)
+	}
+	// node_id is exposed so an owner can remove a member by id (feature 011).
+	if ids["a"] != na.ID || ids["b"] != nb.ID {
+		t.Errorf("member node ids wrong: got %+v, want a=%d b=%d", ids, na.ID, nb.ID)
 	}
 }
 

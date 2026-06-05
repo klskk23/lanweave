@@ -36,6 +36,7 @@ type LeaveZoneRequest struct {
 
 // ZoneMemberResponse is one member of a zone (full transparency within the zone).
 type ZoneMemberResponse struct {
+	NodeID   int64  `json:"node_id"`
 	NodeName string `json:"node_name"`
 	IP       string `json:"ip"`
 	Owner    string `json:"owner"`

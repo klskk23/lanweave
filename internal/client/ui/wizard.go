@@ -13,6 +13,7 @@ import (
 	"lanweave/internal/client/apiclient"
 	"lanweave/internal/client/keyring"
 	"lanweave/internal/client/onboard"
+	"lanweave/internal/client/panel"
 	"lanweave/internal/client/state"
 	"lanweave/internal/client/tunnel"
 )
@@ -194,15 +195,21 @@ func (z *Wizard) runProvision() {
 	}()
 }
 
-// showHome builds the tunnel from the freshly stored key + record and shows the home area.
+// showHome builds the tunnel + management controller from the freshly stored key + record
+// and shows the main panel.
 func (z *Wizard) showHome(rec state.Record) {
 	var tn *tunnel.Tunnel
 	if priv, err := z.keys.Get(keyring.DeviceKeyName); err == nil {
 		tn = tunnel.New(rec, string(priv))
 	} else {
-		tn = tunnel.New(rec, "") // home still renders; Connect will report ErrNoSetup
+		tn = tunnel.New(rec, "") // panel still renders; Connect will report ErrNoSetup
 	}
-	z.win.SetContent(NewHome(z.win, rec, tn))
+	var opts []apiclient.Option
+	if z.insecure {
+		opts = append(opts, apiclient.WithInsecure())
+	}
+	ctrl := panel.New(apiclient.New(rec.ServerURL, opts...), rec, z.keys)
+	z.win.SetContent(NewPanel(z.win, rec, tn, ctrl))
 }
 
 // cancel discards any partial setup (vault key + state record) and returns to the start.

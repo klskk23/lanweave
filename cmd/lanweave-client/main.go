@@ -11,8 +11,10 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 
+	"lanweave/internal/client/apiclient"
 	"lanweave/internal/client/keyring"
 	"lanweave/internal/client/onboard"
+	"lanweave/internal/client/panel"
 	"lanweave/internal/client/state"
 	"lanweave/internal/client/tunnel"
 	"lanweave/internal/client/ui"
@@ -47,7 +49,12 @@ func main() {
 		priv, _ := keys.Get(keyring.DeviceKeyName)
 		tn := tunnel.New(*rec, string(priv))
 		defer tn.Close() // tear the tunnel down cleanly on exit (no orphan adapter)
-		w.SetContent(ui.NewHome(w, *rec, tn))
+		var opts []apiclient.Option
+		if *insecure {
+			opts = append(opts, apiclient.WithInsecure())
+		}
+		ctrl := panel.New(apiclient.New(rec.ServerURL, opts...), *rec, keys)
+		w.SetContent(ui.NewPanel(w, *rec, tn, ctrl))
 	default:
 		ui.NewWizard(w, statePath, keys, *insecure).Start()
 	}
