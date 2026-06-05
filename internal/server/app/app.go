@@ -58,6 +58,12 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("admin bootstrap: %w", err)
 	}
 
+	wgServer, err := setupDataPlane(cfg, log)
+	if err != nil {
+		return err
+	}
+	defer wgServer.Close() // releases handles; leaves the interface up (FR-016)
+
 	cert, err := tls.LoadX509KeyPair(cfg.Server.TLSCert, cfg.Server.TLSKey)
 	if err != nil {
 		return fmt.Errorf("TLS certificate load failed: %w", err)

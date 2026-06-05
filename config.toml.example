@@ -22,12 +22,19 @@ rps   = 100   # tokens per second (default: 100)
 burst = 200   # bucket capacity   (default: 200, must be >= rps)
 
 [wireguard]
-# Address pool. The server takes the first usable address; clients follow.
-# (Validated as a CIDR here; consumed by later features.)
+# Data-plane tunnel. The server takes the first usable pool address (e.g.
+# 100.127.0.1) and listens on listen_port. Consumed at startup to bring up the
+# WireGuard interface; requires the server to run with CAP_NET_ADMIN.
 network     = "100.127.0.0/16"
 listen_port = 51820
 interface   = "wg-lanweave"
 mtu         = 1420
+
+[nftables]
+# Bare name of the dedicated isolation table (family is always `inet`, so this is
+# "lanweave", NOT "inet lanweave"). Rebuilt at startup with a default-drop forward
+# chain; zones add allow rules into it in a later feature.
+table = "lanweave"
 
 [auth]
 # JWT signing secret, >= 32 bytes. Generate with: openssl rand -hex 32

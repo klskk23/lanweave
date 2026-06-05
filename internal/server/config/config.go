@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -37,6 +38,7 @@ type Config struct {
 	Log       LogConfig       `toml:"log"`
 	RateLimit RateLimitConfig `toml:"ratelimit"`
 	WireGuard WireGuardConfig `toml:"wireguard"`
+	NFTables  NFTablesConfig  `toml:"nftables"`
 	Auth      AuthConfig      `toml:"auth"`
 	Admin     AdminConfig     `toml:"admin"`
 }
@@ -63,6 +65,12 @@ type WireGuardConfig struct {
 	ListenPort int    `toml:"listen_port"`
 	Interface  string `toml:"interface"`
 	MTU        int    `toml:"mtu"`
+}
+
+// NFTablesConfig names the dedicated isolation table. The family is always `inet`,
+// so this is the bare table name (e.g. "lanweave"), not "inet lanweave".
+type NFTablesConfig struct {
+	Table string `toml:"table"`
 }
 
 // AuthConfig is validated for presence here but consumed by feature 002.
@@ -120,6 +128,9 @@ func (c *Config) applyDefaults() {
 	if c.Auth.JWTTTL == "" {
 		c.Auth.JWTTTL = "2h"
 	}
+	if c.NFTables.Table == "" {
+		c.NFTables.Table = "lanweave"
+	}
 }
 
 // Validate collects every configuration problem and returns them joined, so the
@@ -168,6 +179,10 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("wireguard.network is required"))
 	} else if _, _, err := net.ParseCIDR(c.WireGuard.Network); err != nil {
 		errs = append(errs, fmt.Errorf("wireguard.network %q is not a valid CIDR: %w", c.WireGuard.Network, err))
+	}
+
+	if strings.ContainsAny(c.NFTables.Table, " \t") {
+		errs = append(errs, errors.New("nftables.table must be a bare name without whitespace (family is always inet)"))
 	}
 
 	if len(c.Auth.JWTSecret.Reveal()) < 32 {

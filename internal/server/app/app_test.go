@@ -2,8 +2,10 @@ package app_test
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,13 +13,47 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/nftables"
+	"github.com/vishvananda/netlink"
 	_ "modernc.org/sqlite"
 
 	"lanweave/internal/server/app"
 	"lanweave/internal/testutil"
 )
 
-func writeConfig(t *testing.T, dataDir, adminPassword, certPath, keyPath string) string {
+// Full app.Run brings up the kernel data plane (WireGuard interface + nftables),
+// so the booting tests below require CAP_NET_ADMIN. They run for real under
+// `unshare -rUn` and skip in a bare unprivileged `go test`.
+
+func uniqueNames(t *testing.T) (iface, table string) {
+	t.Helper()
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	h := hex.EncodeToString(b)
+	return "wgt" + h, "lwtest" + h
+}
+
+// ensureLoopbackUp brings `lo` up. A fresh network namespace (from `unshare -rUn`)
+// starts with loopback down, which would break binding 127.0.0.1; on a real host
+// lo is already up and this is a no-op.
+func ensureLoopbackUp(t *testing.T) {
+	t.Helper()
+	if lo, err := netlink.LinkByName("lo"); err == nil {
+		_ = netlink.LinkSetUp(lo)
+	}
+}
+
+func cleanupDataPlane(iface, table string) {
+	if l, err := netlink.LinkByName(iface); err == nil {
+		_ = netlink.LinkDel(l)
+	}
+	if conn, err := nftables.New(); err == nil {
+		conn.DelTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: table})
+		_ = conn.Flush()
+	}
+}
+
+func writeConfig(t *testing.T, dataDir, adminPassword, certPath, keyPath, iface, table string) string {
 	t.Helper()
 	body := fmt.Sprintf(`
 [server]
@@ -31,6 +67,12 @@ level = "error"
 
 [wireguard]
 network = "100.127.0.0/16"
+listen_port = 0
+interface = %q
+mtu = 1420
+
+[nftables]
+table = %q
 
 [auth]
 jwt_secret = "0123456789abcdef0123456789abcdef"
@@ -38,7 +80,7 @@ jwt_secret = "0123456789abcdef0123456789abcdef"
 [admin]
 username = "admin"
 password = %q
-`, certPath, keyPath, dataDir, adminPassword)
+`, certPath, keyPath, dataDir, iface, table, adminPassword)
 	path := filepath.Join(dataDir, "config.toml")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -56,9 +98,13 @@ func newCerts(t *testing.T, dir string) (cert, key string) {
 }
 
 func TestRunServesAndShutsDown(t *testing.T) {
+	testutil.RequireNetAdmin(t)
+	ensureLoopbackUp(t)
 	dir := t.TempDir()
 	cert, key := newCerts(t, dir)
-	path := writeConfig(t, dir, "supersecret", cert, key)
+	iface, table := uniqueNames(t)
+	t.Cleanup(func() { cleanupDataPlane(iface, table) })
+	path := writeConfig(t, dir, "supersecret", cert, key, iface, table)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	addrCh := make(chan string, 1)
@@ -108,11 +154,15 @@ func TestRunServesAndShutsDown(t *testing.T) {
 }
 
 func TestRunBootstrapsAdminIdempotently(t *testing.T) {
+	testutil.RequireNetAdmin(t)
+	ensureLoopbackUp(t)
 	dir := t.TempDir()
 	cert, key := newCerts(t, dir)
+	iface, table := uniqueNames(t)
+	t.Cleanup(func() { cleanupDataPlane(iface, table) })
 
 	// First boot with one password.
-	path1 := writeConfig(t, dir, "first-password", cert, key)
+	path1 := writeConfig(t, dir, "first-password", cert, key, iface, table)
 	bootAndStop(t, path1)
 	hash1 := readAdminHash(t, filepath.Join(dir, "db.sqlite"))
 	if hash1 == "" {
@@ -123,7 +173,7 @@ func TestRunBootstrapsAdminIdempotently(t *testing.T) {
 	}
 
 	// Second boot with a CHANGED password — stored hash must not change.
-	path2 := writeConfig(t, dir, "second-password", cert, key)
+	path2 := writeConfig(t, dir, "second-password", cert, key, iface, table)
 	bootAndStop(t, path2)
 	hash2 := readAdminHash(t, filepath.Join(dir, "db.sqlite"))
 	if hash1 != hash2 {
@@ -132,9 +182,11 @@ func TestRunBootstrapsAdminIdempotently(t *testing.T) {
 }
 
 func TestRunRejectsMissingAdminPassword(t *testing.T) {
+	// Aborts during config validation, before any data-plane setup, so this needs
+	// no privilege.
 	dir := t.TempDir()
 	cert, key := newCerts(t, dir)
-	path := writeConfig(t, dir, "", cert, key)
+	path := writeConfig(t, dir, "", cert, key, "wgt-unused", "lw-unused")
 
 	err := app.Run(context.Background(), app.Options{ConfigPath: path, Version: "x"})
 	if err == nil {
