@@ -1,0 +1,43 @@
+# lanweave server configuration.
+#
+# SECURITY: this file contains the admin password and the JWT signing secret in
+# plaintext. Restrict it (`chmod 600`, root-owned) and never commit it to git.
+
+[server]
+# HTTPS bind address (host:port). HTTPS only; there is no plaintext listener.
+listen   = "0.0.0.0:8443"
+# PEM certificate and private key. Operator-supplied (self-signed or Let's Encrypt).
+tls_cert = "/etc/lanweave/cert.pem"
+tls_key  = "/etc/lanweave/key.pem"
+# Directory for the SQLite database (db.sqlite) and the server WireGuard key.
+data_dir = "/var/lib/lanweave"
+
+[log]
+# debug | info | warn | error  (default: info)
+level = "info"
+
+[ratelimit]
+# Global token bucket applied to all API routes.
+rps   = 100   # tokens per second (default: 100)
+burst = 200   # bucket capacity   (default: 200, must be >= rps)
+
+[wireguard]
+# Address pool. The server takes the first usable address; clients follow.
+# (Validated as a CIDR here; consumed by later features.)
+network     = "100.127.0.0/16"
+listen_port = 51820
+interface   = "wg-lanweave"
+mtu         = 1420
+
+[auth]
+# JWT signing secret, >= 32 bytes. Generate with: openssl rand -hex 32
+# (Validated for length here; consumed by feature 002.)
+jwt_secret = "REPLACE_WITH_A_32_BYTE_RANDOM_SECRET"
+jwt_ttl    = "2h"
+
+[admin]
+# First administrator. Created on first start if absent; on later starts an
+# existing admin is left untouched (changing this password here does NOT update
+# the stored credential). Change it through the app once feature 002 lands.
+username = "admin"
+password = "CHANGE-ME-ON-FIRST-LOGIN"

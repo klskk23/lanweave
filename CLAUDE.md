@@ -1,4 +1,9 @@
+使用中文对话
 <!-- SPECKIT START -->
-For additional context about technologies to be used, project structure,
-shell commands, and other important information, read the current plan
+Active feature plan: specs/001-server-foundation/plan.md
+
+Project-wide design is frozen in DESIGN.md; slice list is in ROADMAP.md;
+governing principles are in .specify/memory/constitution.md. For the current
+feature's technologies, structure, and shell commands, read the active plan
+above and its sibling research.md / data-model.md / quickstart.md / contracts/.
 <!-- SPECKIT END -->

@@ -1,0 +1,80 @@
+package store_test
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+
+	"lanweave/internal/server/store"
+)
+
+func newStore(t *testing.T) *store.Store {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "db.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return st
+}
+
+func TestMigrateIdempotent(t *testing.T) {
+	st := newStore(t)
+	// A second migration on an already-migrated DB must be a no-op, not an error.
+	if err := st.Migrate(nil); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+}
+
+func TestUserRepoRoundTrip(t *testing.T) {
+	st := newStore(t)
+	repo := st.Users()
+	ctx := context.Background()
+
+	got, err := repo.GetByUsername(ctx, "nobody")
+	if err != nil {
+		t.Fatalf("get absent: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil for absent user, got %+v", got)
+	}
+
+	created, err := repo.CreateAdmin(ctx, "alice", "hash-value")
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	if !created.IsAdmin || created.ID == 0 {
+		t.Fatalf("unexpected created user: %+v", created)
+	}
+
+	// Case-insensitive lookup per COLLATE NOCASE.
+	fetched, err := repo.GetByUsername(ctx, "ALICE")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if fetched == nil || fetched.Username != "alice" || !fetched.IsAdmin {
+		t.Fatalf("unexpected fetched user: %+v", fetched)
+	}
+	if fetched.PasswordHash != "hash-value" {
+		t.Errorf("hash mismatch: %q", fetched.PasswordHash)
+	}
+}
+
+func TestCreateAdminDuplicate(t *testing.T) {
+	st := newStore(t)
+	repo := st.Users()
+	ctx := context.Background()
+
+	if _, err := repo.CreateAdmin(ctx, "alice", "h1"); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	_, err := repo.CreateAdmin(ctx, "alice", "h2")
+	if !errors.Is(err, store.ErrUserExists) {
+		t.Fatalf("expected ErrUserExists, got %v", err)
+	}
+}

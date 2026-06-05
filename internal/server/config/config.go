@@ -1,0 +1,216 @@
+// Package config loads and validates the single TOML configuration file consumed
+// once at startup.
+package config
+
+import (
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"path/filepath"
+	"time"
+
+	toml "github.com/pelletier/go-toml/v2"
+)
+
+// DefaultConfigPath is used when neither --config nor LANWEAVE_CONFIG is set.
+const DefaultConfigPath = "/etc/lanweave/config.toml"
+
+// Secret is a string that never reveals itself through logging or fmt. Use
+// Reveal() to obtain the underlying value where it is actually required.
+type Secret string
+
+func (s Secret) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
+func (s Secret) String() string       { return "[REDACTED]" }
+func (s Secret) Reveal() string       { return string(s) }
+
+// MarshalText redacts the secret for any text-based encoder (including the JSON
+// log handler when an entire Config struct is logged). Decoding is unaffected:
+// Secret intentionally does not implement TextUnmarshaler, so TOML still loads
+// the real value via its underlying string kind.
+func (s Secret) MarshalText() ([]byte, error) { return []byte("[REDACTED]"), nil }
+
+type Config struct {
+	Server    ServerConfig    `toml:"server"`
+	Log       LogConfig       `toml:"log"`
+	RateLimit RateLimitConfig `toml:"ratelimit"`
+	WireGuard WireGuardConfig `toml:"wireguard"`
+	Auth      AuthConfig      `toml:"auth"`
+	Admin     AdminConfig     `toml:"admin"`
+}
+
+type ServerConfig struct {
+	Listen  string `toml:"listen"`
+	TLSCert string `toml:"tls_cert"`
+	TLSKey  string `toml:"tls_key"`
+	DataDir string `toml:"data_dir"`
+}
+
+type LogConfig struct {
+	Level string `toml:"level"`
+}
+
+type RateLimitConfig struct {
+	RPS   float64 `toml:"rps"`
+	Burst int     `toml:"burst"`
+}
+
+// WireGuardConfig is validated for shape here but consumed by later features.
+type WireGuardConfig struct {
+	Network    string `toml:"network"`
+	ListenPort int    `toml:"listen_port"`
+	Interface  string `toml:"interface"`
+	MTU        int    `toml:"mtu"`
+}
+
+// AuthConfig is validated for presence here but consumed by feature 002.
+type AuthConfig struct {
+	JWTSecret Secret `toml:"jwt_secret"`
+	JWTTTL    string `toml:"jwt_ttl"`
+}
+
+type AdminConfig struct {
+	Username string `toml:"username"`
+	Password Secret `toml:"password"`
+}
+
+// DBPath returns the SQLite file path derived from the data directory.
+func (c *Config) DBPath() string {
+	return filepath.Join(c.Server.DataDir, "db.sqlite")
+}
+
+// Resolve picks the config path: --config flag, then LANWEAVE_CONFIG env, then default.
+func Resolve(flagPath string) string {
+	if flagPath != "" {
+		return flagPath
+	}
+	if env := os.Getenv("LANWEAVE_CONFIG"); env != "" {
+		return env
+	}
+	return DefaultConfigPath
+}
+
+// Load reads and decodes the TOML file and applies defaults. It does not validate;
+// call Validate separately so all problems can be reported together.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config %q: %w", path, err)
+	}
+	var c Config
+	if err := toml.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("parse config %q: %w", path, err)
+	}
+	c.applyDefaults()
+	return &c, nil
+}
+
+func (c *Config) applyDefaults() {
+	if c.Log.Level == "" {
+		c.Log.Level = "info"
+	}
+	if c.RateLimit.RPS == 0 {
+		c.RateLimit.RPS = 100
+	}
+	if c.RateLimit.Burst == 0 {
+		c.RateLimit.Burst = 200
+	}
+	if c.Auth.JWTTTL == "" {
+		c.Auth.JWTTTL = "2h"
+	}
+}
+
+// Validate collects every configuration problem and returns them joined, so the
+// operator can fix the file in a single pass. A nil return means the config is usable.
+func (c *Config) Validate() error {
+	var errs []error
+
+	if c.Server.Listen == "" {
+		errs = append(errs, errors.New("server.listen is required"))
+	} else if _, _, err := net.SplitHostPort(c.Server.Listen); err != nil {
+		errs = append(errs, fmt.Errorf("server.listen %q is not host:port: %w", c.Server.Listen, err))
+	}
+
+	certOK := requireReadable(&errs, "server.tls_cert", c.Server.TLSCert)
+	keyOK := requireReadable(&errs, "server.tls_key", c.Server.TLSKey)
+	if certOK && keyOK {
+		if _, err := tls.LoadX509KeyPair(c.Server.TLSCert, c.Server.TLSKey); err != nil {
+			errs = append(errs, fmt.Errorf("server tls cert/key invalid: %w", err))
+		}
+	}
+
+	if c.Server.DataDir == "" {
+		errs = append(errs, errors.New("server.data_dir is required"))
+	} else if info, err := os.Stat(c.Server.DataDir); err != nil {
+		errs = append(errs, fmt.Errorf("server.data_dir %q: %w", c.Server.DataDir, err))
+	} else if !info.IsDir() {
+		errs = append(errs, fmt.Errorf("server.data_dir %q is not a directory", c.Server.DataDir))
+	} else if err := checkWritable(c.Server.DataDir); err != nil {
+		errs = append(errs, fmt.Errorf("server.data_dir %q not writable: %w", c.Server.DataDir, err))
+	}
+
+	switch c.Log.Level {
+	case "debug", "info", "warn", "error":
+	default:
+		errs = append(errs, fmt.Errorf("log.level %q must be one of debug|info|warn|error", c.Log.Level))
+	}
+
+	if c.RateLimit.RPS <= 0 {
+		errs = append(errs, errors.New("ratelimit.rps must be > 0"))
+	}
+	if c.RateLimit.Burst < int(c.RateLimit.RPS) {
+		errs = append(errs, errors.New("ratelimit.burst must be >= ratelimit.rps"))
+	}
+
+	if c.WireGuard.Network == "" {
+		errs = append(errs, errors.New("wireguard.network is required"))
+	} else if _, _, err := net.ParseCIDR(c.WireGuard.Network); err != nil {
+		errs = append(errs, fmt.Errorf("wireguard.network %q is not a valid CIDR: %w", c.WireGuard.Network, err))
+	}
+
+	if len(c.Auth.JWTSecret.Reveal()) < 32 {
+		errs = append(errs, errors.New("auth.jwt_secret must be at least 32 bytes"))
+	}
+	if _, err := time.ParseDuration(c.Auth.JWTTTL); err != nil {
+		errs = append(errs, fmt.Errorf("auth.jwt_ttl %q is not a valid duration: %w", c.Auth.JWTTTL, err))
+	}
+
+	if c.Admin.Username == "" {
+		errs = append(errs, errors.New("admin.username is required"))
+	} else if len(c.Admin.Username) > 64 {
+		errs = append(errs, errors.New("admin.username must be <= 64 characters"))
+	}
+	if c.Admin.Password.Reveal() == "" {
+		errs = append(errs, errors.New("admin.password is required"))
+	}
+
+	return errors.Join(errs...)
+}
+
+// requireReadable records an error if the path is empty or not readable. It
+// returns true only when the file exists and could be opened.
+func requireReadable(errs *[]error, field, path string) bool {
+	if path == "" {
+		*errs = append(*errs, fmt.Errorf("%s is required", field))
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		*errs = append(*errs, fmt.Errorf("%s %q: %w", field, path, err))
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
+func checkWritable(dir string) error {
+	f, err := os.CreateTemp(dir, ".write-check-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	_ = f.Close()
+	return os.Remove(name)
+}

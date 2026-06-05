@@ -1,0 +1,21 @@
+# Build artifacts
+/lanweaved
+*.exe
+*.test
+*.out
+
+# Local runtime / data
+/run/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Secrets / local config (never commit)
+config.toml
+*.pem
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
