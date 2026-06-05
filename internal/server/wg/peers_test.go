@@ -74,6 +74,58 @@ func TestPeerLifecycle(t *testing.T) {
 	}
 }
 
+// TestHandshakesReadsRealPeers (privileged) asserts Handshakes() reads the live
+// kernel device: a freshly added peer that has never completed a handshake appears
+// with the zero time (so the status tracker would treat it offline), and a key that
+// is not a peer is absent from the map. A literal online=true needs a real
+// handshaking client and is covered by the manual quickstart.
+func TestHandshakesReadsRealPeers(t *testing.T) {
+	testutil.RequireNetAdmin(t)
+	name := uniqueIfaceName(t)
+	serverKey, _ := wgtypes.GeneratePrivateKey()
+	srv, err := wg.EnsureInterface(testWGConfig(name), serverKey, quietLog())
+	if err != nil {
+		t.Fatalf("ensure interface: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = srv.Close()
+		if l, e := netlink.LinkByName(name); e == nil {
+			_ = netlink.LinkDel(l)
+		}
+	})
+
+	// No peers yet → empty map (and no error reading the device).
+	hs, err := srv.Handshakes()
+	if err != nil {
+		t.Fatalf("handshakes (empty): %v", err)
+	}
+	if len(hs) != 0 {
+		t.Fatalf("expected 0 handshakes before any peer, got %d", len(hs))
+	}
+
+	peerKey, _ := wgtypes.GeneratePrivateKey()
+	peerPub := peerKey.PublicKey().String()
+	if err := srv.AddPeer(peerPub, netip.MustParseAddr("100.127.0.2")); err != nil {
+		t.Fatalf("add peer: %v", err)
+	}
+
+	hs, err = srv.Handshakes()
+	if err != nil {
+		t.Fatalf("handshakes: %v", err)
+	}
+	ts, ok := hs[peerPub]
+	if !ok {
+		t.Fatal("added peer missing from Handshakes()")
+	}
+	if !ts.IsZero() {
+		t.Errorf("never-handshaked peer should report zero time, got %v", ts)
+	}
+	stranger, _ := wgtypes.GeneratePrivateKey()
+	if _, present := hs[stranger.PublicKey().String()]; present {
+		t.Error("a non-peer key should not appear in Handshakes()")
+	}
+}
+
 func findPeer(peers []wgtypes.Peer, pub wgtypes.Key) *wgtypes.Peer {
 	for i := range peers {
 		if peers[i].PublicKey == pub {

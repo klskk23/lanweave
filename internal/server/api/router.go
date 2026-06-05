@@ -25,6 +25,7 @@ type Options struct {
 	WG       *wg.Server
 	NetFW    *netfw.Manager
 	WGConfig config.WireGuardConfig
+	Status   statusProvider
 }
 
 // NewRouter returns the fully wrapped handler. Middleware order, outermost first:
@@ -39,6 +40,7 @@ func NewRouter(opts Options) http.Handler {
 		wg:       opts.WG,
 		netfw:    opts.NetFW,
 		wgConfig: opts.WGConfig,
+		status:   opts.Status,
 	}
 
 	mux := http.NewServeMux()

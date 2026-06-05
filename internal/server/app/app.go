@@ -17,6 +17,7 @@ import (
 	"lanweave/internal/server/auth"
 	"lanweave/internal/server/config"
 	"lanweave/internal/server/logging"
+	"lanweave/internal/server/status"
 	"lanweave/internal/server/store"
 )
 
@@ -74,6 +75,12 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("rebuild zone rules: %w", err)
 	}
 
+	// Poll the live device for per-peer handshake times so the API can report node
+	// online status. The snapshot is derived, ephemeral state (rebuilt every poll);
+	// the goroutine stops when ctx is cancelled at shutdown.
+	onlineTracker := status.New(wgServer.Handshakes, status.DefaultInterval, log)
+	go onlineTracker.Run(ctx)
+
 	cert, err := tls.LoadX509KeyPair(cfg.Server.TLSCert, cfg.Server.TLSKey)
 	if err != nil {
 		return fmt.Errorf("TLS certificate load failed: %w", err)
@@ -95,6 +102,7 @@ func Run(ctx context.Context, opts Options) error {
 		WG:       wgServer,
 		NetFW:    nftMgr,
 		WGConfig: cfg.WireGuard,
+		Status:   onlineTracker,
 		Limiter:  limiter,
 		Logger:   log,
 		Store:    st,

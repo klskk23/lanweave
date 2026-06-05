@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -164,6 +165,21 @@ func peerConfig(publicKey string, ip netip.Addr) (wgtypes.PeerConfig, error) {
 		ReplaceAllowedIPs: true,
 		AllowedIPs:        []net.IPNet{allowed},
 	}, nil
+}
+
+// Handshakes returns each current peer's last-handshake time keyed by public key.
+// A peer that has never completed a handshake reports the zero time. This is a
+// single netlink read of the live device; the online-status tracker polls it.
+func (s *Server) Handshakes() (map[string]time.Time, error) {
+	dev, err := s.wgc.Device(s.name)
+	if err != nil {
+		return nil, fmt.Errorf("read device %s: %w", s.name, err)
+	}
+	m := make(map[string]time.Time, len(dev.Peers))
+	for _, p := range dev.Peers {
+		m[p.PublicKey.String()] = p.LastHandshakeTime
+	}
+	return m, nil
 }
 
 // PublicKey returns the server's WireGuard public key.

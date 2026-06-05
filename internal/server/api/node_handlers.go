@@ -14,6 +14,14 @@ import (
 	"lanweave/pkg/protocol"
 )
 
+// statusProvider reports per-node online state derived from the live tunnel.
+// Satisfied by *status.Tracker; an interface keeps the API package independent of
+// the data plane and lets handler tests use a fake over a real store.
+type statusProvider interface {
+	Online(pubKey string) bool
+	LastHandshake(pubKey string) (time.Time, bool)
+}
+
 // registerNode allocates an address, persists the node, and adds its tunnel peer.
 func (h *handlers) registerNode(w http.ResponseWriter, r *http.Request) {
 	id, ok := IdentityFrom(r.Context())
@@ -84,12 +92,17 @@ func (h *handlers) listNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]protocol.NodeResponse, 0, len(nodes))
 	for _, n := range nodes {
-		items = append(items, protocol.NodeResponse{
+		item := protocol.NodeResponse{
 			ID:        n.ID,
 			Name:      n.Name,
 			IP:        n.IP.String(),
 			CreatedAt: n.CreatedAt.Format(time.RFC3339),
-		})
+			Online:    h.status.Online(n.PubKey),
+		}
+		if ts, ok := h.status.LastHandshake(n.PubKey); ok {
+			item.LastHandshake = ts.Format(time.RFC3339)
+		}
+		items = append(items, item)
 	}
 	writeJSON(w, http.StatusOK, protocol.NodeListResponse{Nodes: items})
 }

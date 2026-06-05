@@ -26,6 +26,7 @@ import (
 	"lanweave/internal/server/api"
 	"lanweave/internal/server/auth"
 	"lanweave/internal/server/config"
+	"lanweave/internal/server/ipam"
 	"lanweave/internal/server/netfw"
 	"lanweave/internal/server/store"
 	"lanweave/internal/server/wg"
@@ -94,6 +95,7 @@ func newNodeHarness(t *testing.T) *nodeHarness {
 		Version: "test", Limiter: rate.NewLimiter(rate.Limit(10000), 10000),
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Store:  st, JWT: jwtMgr, WG: srv, NetFW: mgr, WGConfig: wgCfg,
+		Status: &fakeStatus{handshakes: map[string]time.Time{}},
 	})
 	return &nodeHarness{t: t, router: router, store: st, jwt: jwtMgr, wgName: wgName, wgCfg: wgCfg, nftName: nftName}
 }
@@ -292,6 +294,60 @@ func TestListNodesScoped(t *testing.T) {
 	decodeJSONBody(t, h.req(http.MethodGet, "/api/v1/nodes", bob, nil).Body.Bytes(), &bobList)
 	if len(bobList.Nodes) != 0 {
 		t.Fatalf("bob list = %d, want 0 (empty, not error)", len(bobList.Nodes))
+	}
+}
+
+// US1 (007) — GET /nodes reports per-node online status and last_handshake. This
+// is non-privileged: nodes are seeded directly into the real SQLite store and the
+// online state is driven through the fake statusProvider (our own seam), so no
+// WireGuard device is needed.
+func TestListNodesOnlineStatus(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	u, err := h.store.Users().CreateAdmin(ctx, "alice", "hash")
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	first, last, err := ipam.PoolRange("100.127.0.0/16")
+	if err != nil {
+		t.Fatalf("pool range: %v", err)
+	}
+	onlinePub := nodePubKey(t)
+	neverPub := nodePubKey(t)
+	if _, err := h.store.Nodes().Create(ctx, u.ID, "connected", onlinePub, first, last); err != nil {
+		t.Fatalf("seed connected node: %v", err)
+	}
+	if _, err := h.store.Nodes().Create(ctx, u.ID, "never", neverPub, first, last); err != nil {
+		t.Fatalf("seed never node: %v", err)
+	}
+	// connected handshaked just now → online; "never" is absent from the snapshot.
+	h.status.handshakes[onlinePub] = time.Now()
+
+	// Unauthenticated → 401.
+	if rec := h.do(http.MethodGet, "/api/v1/nodes", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauth list: status %d, want 401", rec.Code)
+	}
+
+	tok, err := h.jwt.Issue(auth.Claims{UserID: u.ID, Username: "alice"})
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	rec := h.do(http.MethodGet, "/api/v1/nodes", tok, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status %d: %s", rec.Code, rec.Body.String())
+	}
+	var list protocol.NodeListResponse
+	decodeJSONBody(t, rec.Body.Bytes(), &list)
+	byName := map[string]protocol.NodeResponse{}
+	for _, n := range list.Nodes {
+		byName[n.Name] = n
+	}
+	if c := byName["connected"]; !c.Online || c.LastHandshake == "" {
+		t.Errorf("connected node: online=%v last_handshake=%q, want online=true with a timestamp", c.Online, c.LastHandshake)
+	}
+	if n := byName["never"]; n.Online || n.LastHandshake != "" {
+		t.Errorf("never-connected node: online=%v last_handshake=%q, want online=false with no last_handshake", n.Online, n.LastHandshake)
 	}
 }
 

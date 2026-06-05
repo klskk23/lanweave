@@ -70,6 +70,7 @@ func newZoneHarness(t *testing.T) *zoneHarness {
 		Version: "test", Limiter: rate.NewLimiter(rate.Limit(10000), 10000),
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Store:  st, JWT: jwtMgr, NetFW: mgr,
+		Status: &fakeStatus{handshakes: map[string]time.Time{}},
 	})
 	return &zoneHarness{t: t, router: router, store: st, jwt: jwtMgr, table: table}
 }

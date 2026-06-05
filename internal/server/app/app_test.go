@@ -1,11 +1,13 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,10 +17,12 @@ import (
 
 	"github.com/google/nftables"
 	"github.com/vishvananda/netlink"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 	_ "modernc.org/sqlite"
 
 	"lanweave/internal/server/app"
 	"lanweave/internal/testutil"
+	"lanweave/pkg/protocol"
 )
 
 // Full app.Run brings up the kernel data plane (WireGuard interface + nftables),
@@ -151,6 +155,113 @@ func TestRunServesAndShutsDown(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("graceful shutdown exceeded 10s")
+	}
+}
+
+// TestRunReportsNodeOfflineUntilConnected is the quickstart Scenario A acceptance
+// test against the real booted binary: a registered node that never connects is
+// reported online:false with no last_handshake. (A literal online=true needs a real
+// handshaking client and is the manual quickstart scenario.)
+func TestRunReportsNodeOfflineUntilConnected(t *testing.T) {
+	testutil.RequireNetAdmin(t)
+	ensureLoopbackUp(t)
+	dir := t.TempDir()
+	cert, key := newCerts(t, dir)
+	iface, table := uniqueNames(t)
+	t.Cleanup(func() { cleanupDataPlane(iface, table) })
+	const adminPW = "supersecret-pw"
+	path := writeConfig(t, dir, adminPW, cert, key, iface, table)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addrCh := make(chan string, 1)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- app.Run(ctx, app.Options{ConfigPath: path, Version: "acc", Ready: func(a string) { addrCh <- a }})
+	}()
+	var addr string
+	select {
+	case addr = <-addrCh:
+	case err := <-runErr:
+		t.Fatalf("server exited before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("server not ready within 5s")
+	}
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test client
+	}}
+	base := "https://" + addr
+
+	// Log in as admin.
+	var login protocol.LoginResponse
+	doJSON(t, client, http.MethodPost, base+"/api/v1/login", "",
+		protocol.LoginRequest{Username: "admin", Password: adminPW}, http.StatusOK, &login)
+
+	// Register a node (never connects).
+	nodeKey, _ := wgtypes.GeneratePrivateKey()
+	var node protocol.NodeResponse
+	doJSON(t, client, http.MethodPost, base+"/api/v1/nodes", login.Token,
+		protocol.RegisterNodeRequest{Name: "laptop", WGPubKey: nodeKey.PublicKey().String()},
+		http.StatusCreated, &node)
+
+	// List nodes → the node is present but offline, with no last handshake.
+	var list protocol.NodeListResponse
+	doJSON(t, client, http.MethodGet, base+"/api/v1/nodes", login.Token, nil, http.StatusOK, &list)
+	if len(list.Nodes) != 1 {
+		t.Fatalf("node list = %d, want 1", len(list.Nodes))
+	}
+	if list.Nodes[0].Online {
+		t.Error("never-connected node reported online")
+	}
+	if list.Nodes[0].LastHandshake != "" {
+		t.Errorf("never-connected node has last_handshake = %q, want empty", list.Nodes[0].LastHandshake)
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned error on shutdown: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("graceful shutdown exceeded 10s")
+	}
+}
+
+// doJSON sends an optional JSON body with an optional bearer token, asserts the
+// status code, and decodes the response into out (when non-nil).
+func doJSON(t *testing.T, client *http.Client, method, url, token string, body any, wantStatus int, out any) {
+	t.Helper()
+	var req *http.Request
+	var err error
+	if body != nil {
+		b, _ := json.Marshal(body)
+		req, err = http.NewRequest(method, url, bytes.NewReader(b))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+	} else {
+		req, err = http.NewRequest(method, url, nil)
+	}
+	if err != nil {
+		t.Fatalf("build request %s %s: %v", method, url, err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("%s %s status = %d, want %d", method, url, resp.StatusCode, wantStatus)
+	}
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			t.Fatalf("decode %s %s: %v", method, url, err)
+		}
 	}
 }
 

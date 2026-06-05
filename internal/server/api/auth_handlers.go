@@ -25,6 +25,7 @@ type handlers struct {
 	wg       *wg.Server
 	netfw    *netfw.Manager
 	wgConfig config.WireGuardConfig
+	status   statusProvider
 }
 
 func (h *handlers) serverError(w http.ResponseWriter, err error) {

@@ -21,6 +21,28 @@ import (
 
 const harnessJWTSecret = "0123456789abcdef0123456789abcdef"
 
+// fakeStatus is a test double for the api package's statusProvider. It is our own
+// seam (not a mocked system boundary): the real tracker is integration-tested
+// against a real device, while this lets handler tests drive online state over a
+// real SQLite store. handshakes maps a public key to its last handshake; an absent
+// or zero entry means "never connected" (offline).
+type fakeStatus struct {
+	handshakes map[string]time.Time
+}
+
+func (f *fakeStatus) Online(pubKey string) bool {
+	ts, ok := f.handshakes[pubKey]
+	return ok && !ts.IsZero() && time.Since(ts) < 3*time.Minute
+}
+
+func (f *fakeStatus) LastHandshake(pubKey string) (time.Time, bool) {
+	ts, ok := f.handshakes[pubKey]
+	if !ok || ts.IsZero() {
+		return time.Time{}, false
+	}
+	return ts, true
+}
+
 type harness struct {
 	t       *testing.T
 	router  http.Handler
@@ -28,6 +50,7 @@ type harness struct {
 	jwt     *auth.JWTManager
 	logBuf  *bytes.Buffer
 	adminPW string
+	status  *fakeStatus
 }
 
 func newHarness(t *testing.T) *harness {
@@ -53,14 +76,16 @@ func newHarness(t *testing.T) *harness {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	jwtMgr := auth.NewJWTManager(harnessJWTSecret, time.Hour)
+	fakeStat := &fakeStatus{handshakes: map[string]time.Time{}}
 	router := api.NewRouter(api.Options{
 		Version: "test",
 		Limiter: rate.NewLimiter(rate.Limit(10000), 10000),
 		Logger:  logger,
 		Store:   st,
 		JWT:     jwtMgr,
+		Status:  fakeStat,
 	})
-	return &harness{t: t, router: router, store: st, jwt: jwtMgr, logBuf: &buf, adminPW: adminPW}
+	return &harness{t: t, router: router, store: st, jwt: jwtMgr, logBuf: &buf, adminPW: adminPW, status: fakeStat}
 }
 
 func (h *harness) do(method, path, token string, body any) *httptest.ResponseRecorder {

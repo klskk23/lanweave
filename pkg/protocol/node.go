@@ -8,10 +8,12 @@ type RegisterNodeRequest struct {
 
 // NodeResponse describes a node in API responses (address in dotted form).
 type NodeResponse struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	IP        string `json:"ip"`
-	CreatedAt string `json:"created_at,omitempty"`
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	IP            string `json:"ip"`
+	CreatedAt     string `json:"created_at,omitempty"`
+	Online        bool   `json:"online"`
+	LastHandshake string `json:"last_handshake,omitempty"`
 }
 
 // NodeListResponse wraps a user's nodes.
