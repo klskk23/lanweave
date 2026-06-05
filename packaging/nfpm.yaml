@@ -1,0 +1,37 @@
+name: lanweave
+arch: amd64
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: lanweave <noreply@lanweave.local>
+description: |
+  lanweave VPN relay server.
+  A lightweight C/S VPN relay: WireGuard tunnels + nftables zone isolation,
+  managed as a systemd service.
+license: proprietary
+
+# openssl is used by the post-install to generate the self-signed certificate and the
+# random per-install secrets, so the service can start out of the box.
+depends:
+  - openssl
+
+contents:
+  - src: ./lanweaved
+    dst: /usr/bin/lanweaved
+    file_info:
+      mode: 0755
+  - src: ./config.toml.example
+    dst: /etc/lanweave/config.toml.example
+    type: config
+    file_info:
+      mode: 0644
+  - src: ./deploy/systemd/lanweaved.service
+    dst: /lib/systemd/system/lanweaved.service
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: ./packaging/scripts/postinstall.sh
+  preremove: ./packaging/scripts/preremove.sh
+  postremove: ./packaging/scripts/postremove.sh

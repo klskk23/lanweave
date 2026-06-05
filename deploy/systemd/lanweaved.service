@@ -1,0 +1,24 @@
+[Unit]
+Description=lanweave VPN relay server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+# Least privilege: the kernel nftables + WireGuard data plane needs CAP_NET_ADMIN,
+# and nothing else. (If you bind a port below 1024, also add CAP_NET_BIND_SERVICE.)
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+ExecStart=/usr/bin/lanweaved -config /etc/lanweave/config.toml
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+# Filesystem hardening: only the data and config directories are writable.
+ProtectSystem=full
+ReadWritePaths=/var/lib/lanweave /etc/lanweave
+
+[Install]
+WantedBy=multi-user.target
