@@ -19,3 +19,6 @@ config.toml
 .idea/
 .vscode/
 *.swp
+
+# Spec Kit harness cache (generated)
+.specify/workflows/.cache/
