@@ -13,6 +13,8 @@ import (
 	"lanweave/internal/client/apiclient"
 	"lanweave/internal/client/keyring"
 	"lanweave/internal/client/onboard"
+	"lanweave/internal/client/state"
+	"lanweave/internal/client/tunnel"
 )
 
 // Wizard drives the first-run setup screens, binding the UI to the Fyne-free onboarding
@@ -187,9 +189,20 @@ func (z *Wizard) runProvision() {
 				}
 				return
 			}
-			z.win.SetContent(NewHome(rec))
+			z.showHome(rec)
 		})
 	}()
+}
+
+// showHome builds the tunnel from the freshly stored key + record and shows the home area.
+func (z *Wizard) showHome(rec state.Record) {
+	var tn *tunnel.Tunnel
+	if priv, err := z.keys.Get(keyring.DeviceKeyName); err == nil {
+		tn = tunnel.New(rec, string(priv))
+	} else {
+		tn = tunnel.New(rec, "") // home still renders; Connect will report ErrNoSetup
+	}
+	z.win.SetContent(NewHome(z.win, rec, tn))
 }
 
 // cancel discards any partial setup (vault key + state record) and returns to the start.

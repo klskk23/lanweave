@@ -14,6 +14,7 @@ import (
 	"lanweave/internal/client/keyring"
 	"lanweave/internal/client/onboard"
 	"lanweave/internal/client/state"
+	"lanweave/internal/client/tunnel"
 	"lanweave/internal/client/ui"
 )
 
@@ -25,6 +26,9 @@ func main() {
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification (advanced; not shown in the UI)")
 	flag.Parse()
 
+	// On Windows, creating the WinTun adapter requires administrator rights; the installer
+	// ships a `requireAdministrator` manifest so the app runs elevated (feature 012). If the
+	// app is not elevated, adapter creation fails and the home view surfaces ErrAdapter.
 	a := app.NewWithID("com.lanweave.client")
 	w := a.NewWindow("lanweave " + version)
 	w.Resize(fyne.NewSize(440, 380))
@@ -40,7 +44,10 @@ func main() {
 
 	switch target, rec := onboard.StartupTarget(statePath); target {
 	case onboard.Home:
-		w.SetContent(ui.NewHome(*rec))
+		priv, _ := keys.Get(keyring.DeviceKeyName)
+		tn := tunnel.New(*rec, string(priv))
+		defer tn.Close() // tear the tunnel down cleanly on exit (no orphan adapter)
+		w.SetContent(ui.NewHome(w, *rec, tn))
 	default:
 		ui.NewWizard(w, statePath, keys, *insecure).Start()
 	}
