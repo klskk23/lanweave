@@ -1,5 +1,6 @@
 # Build artifacts
 /lanweaved
+/lanweave-client
 *.exe
 *.test
 *.out

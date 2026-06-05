@@ -1,0 +1,192 @@
+package onboard_test
+
+import (
+	"errors"
+	"path/filepath"
+	"testing"
+
+	"lanweave/internal/client/apiclient"
+	"lanweave/internal/client/keyring"
+	"lanweave/internal/client/onboard"
+	"lanweave/internal/client/state"
+	"lanweave/pkg/protocol"
+)
+
+// fakeAPI is a programmable stand-in for the REST client (our own seam). It returns the
+// apiclient package's typed errors so the controller's recovery logic is exercised.
+type fakeAPI struct {
+	registerErr   error
+	loginErr      error
+	registerNode  func(name, pub string) (protocol.NodeResponse, error)
+	listNodes     func() (protocol.NodeListResponse, error)
+	serverInfo    protocol.ServerInfoResponse
+	serverInfoErr error
+
+	registerCalls     int
+	registerNodeCalls int
+}
+
+func (f *fakeAPI) Register(_, _, _ string) error { f.registerCalls++; return f.registerErr }
+func (f *fakeAPI) Login(_, _ string) error       { return f.loginErr }
+func (f *fakeAPI) RegisterNode(name, pub string) (protocol.NodeResponse, error) {
+	f.registerNodeCalls++
+	if f.registerNode != nil {
+		return f.registerNode(name, pub)
+	}
+	return protocol.NodeResponse{ID: 1, Name: name, IP: "100.127.0.2"}, nil
+}
+func (f *fakeAPI) ListNodes() (protocol.NodeListResponse, error) {
+	if f.listNodes != nil {
+		return f.listNodes()
+	}
+	return protocol.NodeListResponse{}, nil
+}
+func (f *fakeAPI) ServerInfo() (protocol.ServerInfoResponse, error) {
+	return f.serverInfo, f.serverInfoErr
+}
+
+func newProvisioner(t *testing.T, api *fakeAPI) (*onboard.Provisioner, *keyring.Fake, string) {
+	t.Helper()
+	fk := keyring.NewFake()
+	statePath := filepath.Join(t.TempDir(), "lanweave", "state.json")
+	p := &onboard.Provisioner{
+		API: api, Keys: fk, StatePath: statePath, ServerURL: "https://vpn.example.com",
+	}
+	return p, fk, statePath
+}
+
+func okServerInfo() protocol.ServerInfoResponse {
+	return protocol.ServerInfoResponse{PublicKey: "srv-pub", Endpoint: "vpn:51820", Network: "100.127.0.0/16", MTU: 1420}
+}
+
+func TestProvisionCreateAccount(t *testing.T) {
+	api := &fakeAPI{serverInfo: okServerInfo()}
+	p, fk, statePath := newProvisioner(t, api)
+
+	rec, err := p.Provision(onboard.Credentials{Mode: onboard.CreateAccount, Invite: "good", Username: "alice", Password: "pw"}, "laptop")
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if api.registerCalls != 1 {
+		t.Errorf("expected account creation; register calls = %d", api.registerCalls)
+	}
+	if rec.IP != "100.127.0.2" || rec.ServerPublicKey != "srv-pub" || rec.Network != "100.127.0.0/16" {
+		t.Errorf("record missing server info: %+v", rec)
+	}
+	if key, err := fk.Get(keyring.DeviceKeyName); err != nil || len(key) == 0 {
+		t.Errorf("private key not stored in vault: %v", err)
+	}
+	if got, err := state.Load(statePath); err != nil || got.IP != "100.127.0.2" {
+		t.Errorf("state not written: %+v %v", got, err)
+	}
+}
+
+func TestProvisionSignIn(t *testing.T) {
+	api := &fakeAPI{serverInfo: okServerInfo()}
+	p, _, statePath := newProvisioner(t, api)
+
+	if _, err := p.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "alice", Password: "pw"}, "laptop"); err != nil {
+		t.Fatalf("provision sign-in: %v", err)
+	}
+	if api.registerCalls != 0 {
+		t.Errorf("sign-in must not create an account; register calls = %d", api.registerCalls)
+	}
+	if !state.Exists(statePath) {
+		t.Error("state not written on sign-in path")
+	}
+}
+
+func TestStartupTarget(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "lanweave", "state.json")
+	// Absent → wizard.
+	if target, rec := onboard.StartupTarget(statePath); target != onboard.Wizard || rec != nil {
+		t.Errorf("absent state: target=%v rec=%v, want Wizard/nil", target, rec)
+	}
+	// Present+valid → home.
+	_ = state.Save(statePath, state.Record{ServerURL: "https://s", NodeName: "n", IP: "100.127.0.2", ServerPublicKey: "k", Endpoint: "e", Network: "100.127.0.0/16"})
+	if target, rec := onboard.StartupTarget(statePath); target != onboard.Home || rec == nil || rec.IP != "100.127.0.2" {
+		t.Errorf("present state: target=%v rec=%+v, want Home + record", target, rec)
+	}
+}
+
+func TestProvisionAuthAndNameErrors(t *testing.T) {
+	// Sign-in failure surfaces ErrAuthFailed and writes nothing.
+	api := &fakeAPI{loginErr: apiclient.ErrAuthFailed}
+	p, fk, statePath := newProvisioner(t, api)
+	if _, err := p.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "a", Password: "bad"}, "laptop"); !errors.Is(err, apiclient.ErrAuthFailed) {
+		t.Errorf("auth fail: got %v, want ErrAuthFailed", err)
+	}
+	if state.Exists(statePath) {
+		t.Error("state written despite auth failure")
+	}
+	if _, err := fk.Get(keyring.DeviceKeyName); !errors.Is(err, keyring.ErrNotFound) {
+		t.Error("key stored despite auth failure (auth happens before keygen)")
+	}
+
+	// Duplicate device name surfaces ErrNodeNameTaken for the UI to recover.
+	api2 := &fakeAPI{serverInfo: okServerInfo(), registerNode: func(_, _ string) (protocol.NodeResponse, error) {
+		return protocol.NodeResponse{}, apiclient.ErrNodeNameTaken
+	}}
+	p2, _, _ := newProvisioner(t, api2)
+	if _, err := p2.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "a", Password: "p"}, "taken"); !errors.Is(err, apiclient.ErrNodeNameTaken) {
+		t.Errorf("dup name: got %v, want ErrNodeNameTaken", err)
+	}
+}
+
+func TestCancelCleanup(t *testing.T) {
+	api := &fakeAPI{serverInfo: okServerInfo()}
+	p, fk, statePath := newProvisioner(t, api)
+	if _, err := p.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "a", Password: "p"}, "laptop"); err != nil {
+		t.Fatal(err)
+	}
+	// Both the vault key and the state record exist after a successful provision.
+	if _, err := fk.Get(keyring.DeviceKeyName); err != nil {
+		t.Fatal("precondition: key should exist")
+	}
+	if !state.Exists(statePath) {
+		t.Fatal("precondition: state should exist")
+	}
+	// Cleanup removes both, leaving a fresh machine.
+	if err := p.Cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := fk.Get(keyring.DeviceKeyName); !errors.Is(err, keyring.ErrNotFound) {
+		t.Error("vault key remains after cleanup")
+	}
+	if state.Exists(statePath) {
+		t.Error("state record remains after cleanup")
+	}
+}
+
+// TestPartialFailureRecovery: a prior attempt registered the device (server returns
+// pubkey_taken), so the controller recovers the address from the device list and
+// completes without creating a duplicate.
+func TestPartialFailureRecovery(t *testing.T) {
+	api := &fakeAPI{
+		serverInfo: okServerInfo(),
+		registerNode: func(_, _ string) (protocol.NodeResponse, error) {
+			return protocol.NodeResponse{}, apiclient.ErrPubKeyTaken
+		},
+		listNodes: func() (protocol.NodeListResponse, error) {
+			return protocol.NodeListResponse{Nodes: []protocol.NodeResponse{
+				{ID: 7, Name: "other", IP: "100.127.0.3"},
+				{ID: 8, Name: "laptop", IP: "100.127.0.5"},
+			}}, nil
+		},
+	}
+	p, _, statePath := newProvisioner(t, api)
+
+	rec, err := p.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "a", Password: "p"}, "laptop")
+	if err != nil {
+		t.Fatalf("recovery provision: %v", err)
+	}
+	if rec.IP != "100.127.0.5" {
+		t.Errorf("recovered address = %s, want 100.127.0.5 (matched by name)", rec.IP)
+	}
+	if api.registerNodeCalls != 1 {
+		t.Errorf("RegisterNode called %d times; recovery must not re-create (no duplicate)", api.registerNodeCalls)
+	}
+	if !state.Exists(statePath) {
+		t.Error("state not written after recovery")
+	}
+}
