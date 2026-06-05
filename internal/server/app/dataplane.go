@@ -12,34 +12,46 @@ import (
 	"lanweave/internal/server/wg"
 )
 
-// setupDataPlane brings up the server's WireGuard interface, enables forwarding,
-// and rebuilds the nftables isolation table. It returns the wg.Server whose Close
-// must be called on shutdown (which releases handles but leaves the interface up).
+// setupDataPlane brings up the server's WireGuard interface and enables IP
+// forwarding, returning the wg.Server (whose Close must be called on shutdown) and
+// the netfw.Manager. The nftables isolation table is built separately from the
+// database (rebuildZoneRules) so it can be populated with the current zones.
 // Any failure is fatal to startup (the relay must not serve half-configured).
-func setupDataPlane(cfg *config.Config, log *slog.Logger) (*wg.Server, error) {
+func setupDataPlane(cfg *config.Config, log *slog.Logger) (*wg.Server, *netfw.Manager, error) {
 	keyPath := filepath.Join(cfg.Server.DataDir, "wg_private")
 	key, generated, err := wg.LoadOrGenerateKey(keyPath)
 	if err != nil {
-		return nil, fmt.Errorf("server key: %w", err)
+		return nil, nil, fmt.Errorf("server key: %w", err)
 	}
 	log.Info("server key ready", "generated", generated, "path", keyPath)
 
 	srv, err := wg.EnsureInterface(cfg.WireGuard, key, log)
 	if err != nil {
-		return nil, fmt.Errorf("wireguard interface: %w", err)
+		return nil, nil, fmt.Errorf("wireguard interface: %w", err)
 	}
 
 	if err := netfw.EnableIPv4Forward(); err != nil {
 		_ = srv.Close()
-		return nil, fmt.Errorf("ipv4 forwarding: %w", err)
+		return nil, nil, fmt.Errorf("ipv4 forwarding: %w", err)
 	}
 	log.Info("ipv4 forwarding enabled")
 
-	if err := netfw.NewManager(cfg.NFTables.Table).Rebuild(log); err != nil {
-		_ = srv.Close()
-		return nil, fmt.Errorf("nftables setup: %w", err)
+	return srv, netfw.NewManager(cfg.NFTables.Table), nil
+}
+
+// rebuildZoneRules rebuilds the nftables isolation table from the database so the
+// sets/rules exactly match the recorded zone memberships (FR-017). With no zones
+// this produces the empty default-deny skeleton (feature 003).
+func rebuildZoneRules(ctx context.Context, repo *store.ZoneRepo, mgr *netfw.Manager, log *slog.Logger) error {
+	states, err := repo.AllForRebuild(ctx)
+	if err != nil {
+		return err
 	}
-	return srv, nil
+	zones := make([]netfw.ZoneState, 0, len(states))
+	for _, s := range states {
+		zones = append(zones, netfw.ZoneState{ID: s.ID, MemberIPs: s.MemberIPs})
+	}
+	return mgr.Rebuild(zones, log)
 }
 
 // rebuildNodePeers restores every registered node as a WireGuard peer from the

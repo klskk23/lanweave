@@ -101,6 +101,31 @@ ORDER BY c LIMIT 1`
 	return uint32(c), true, nil
 }
 
+// GetOwned returns the node only if it is owned by userID, else ErrNodeNotFound.
+func (r *NodeRepo) GetOwned(ctx context.Context, userID, nodeID int64) (*Node, error) {
+	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at FROM nodes WHERE id = ? AND user_id = ?`
+	var (
+		n         Node
+		ipVal     int64
+		createdAt string
+	)
+	err := r.db.QueryRowContext(ctx, q, nodeID, userID).
+		Scan(&n.ID, &n.UserID, &n.Name, &n.PubKey, &ipVal, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNodeNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get owned node: %w", err)
+	}
+	n.IP = ipam.Uint32ToAddr(uint32(ipVal))
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse created_at: %w", err)
+	}
+	n.CreatedAt = t
+	return &n, nil
+}
+
 // ListByUser returns the user's nodes, newest first.
 func (r *NodeRepo) ListByUser(ctx context.Context, userID int64) ([]Node, error) {
 	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at FROM nodes WHERE user_id = ? ORDER BY id DESC`

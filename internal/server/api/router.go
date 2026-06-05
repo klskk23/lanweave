@@ -9,6 +9,7 @@ import (
 
 	"lanweave/internal/server/auth"
 	"lanweave/internal/server/config"
+	"lanweave/internal/server/netfw"
 	"lanweave/internal/server/store"
 	"lanweave/internal/server/wg"
 	"lanweave/pkg/protocol"
@@ -22,6 +23,7 @@ type Options struct {
 	Store    *store.Store
 	JWT      *auth.JWTManager
 	WG       *wg.Server
+	NetFW    *netfw.Manager
 	WGConfig config.WireGuardConfig
 }
 
@@ -35,6 +37,7 @@ func NewRouter(opts Options) http.Handler {
 		log:      opts.Logger,
 		version:  opts.Version,
 		wg:       opts.WG,
+		netfw:    opts.NetFW,
 		wgConfig: opts.WGConfig,
 	}
 
@@ -51,6 +54,13 @@ func NewRouter(opts Options) http.Handler {
 	mux.Handle("POST /api/v1/nodes", AuthRequired(opts.JWT)(http.HandlerFunc(h.registerNode)))
 	mux.Handle("GET /api/v1/nodes", AuthRequired(opts.JWT)(http.HandlerFunc(h.listNodes)))
 	mux.Handle("DELETE /api/v1/nodes/{id}", AuthRequired(opts.JWT)(http.HandlerFunc(h.deleteNode)))
+
+	// Zones (any authenticated user).
+	mux.Handle("POST /api/v1/zones", AuthRequired(opts.JWT)(http.HandlerFunc(h.createZone)))
+	mux.Handle("GET /api/v1/zones", AuthRequired(opts.JWT)(http.HandlerFunc(h.listZones)))
+	mux.Handle("POST /api/v1/zones/{name}/join", AuthRequired(opts.JWT)(http.HandlerFunc(h.joinZone)))
+	mux.Handle("POST /api/v1/zones/{name}/leave", AuthRequired(opts.JWT)(http.HandlerFunc(h.leaveZone)))
+	mux.Handle("GET /api/v1/zones/{name}/members", AuthRequired(opts.JWT)(http.HandlerFunc(h.zoneMembers)))
 
 	// Admin-only endpoints.
 	mux.Handle("POST /api/v1/admin/invites",

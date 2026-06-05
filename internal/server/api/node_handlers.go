@@ -106,7 +106,9 @@ func (h *handlers) deleteNode(w http.ResponseWriter, r *http.Request) {
 		protocol.WriteJSONError(w, http.StatusNotFound, "not_found", "Node not found.")
 		return
 	}
-	pubKey, err := h.store.Nodes().DeleteOwned(r.Context(), id.UserID, nodeID)
+
+	// Look up the owned node (for its address + zones) before deleting it.
+	node, err := h.store.Nodes().GetOwned(r.Context(), id.UserID, nodeID)
 	if err != nil {
 		if errors.Is(err, store.ErrNodeNotFound) {
 			protocol.WriteJSONError(w, http.StatusNotFound, "not_found", "Node not found.")
@@ -115,9 +117,32 @@ func (h *handlers) deleteNode(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, err)
 		return
 	}
-	// DB is authoritative; remove the peer best-effort (startup rebuild reconciles).
-	if err := h.wg.RemovePeer(pubKey); err != nil {
+	zoneIDs, err := h.store.Zones().ZonesForNode(r.Context(), nodeID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+
+	if _, err := h.store.Nodes().DeleteOwned(r.Context(), id.UserID, nodeID); err != nil {
+		if errors.Is(err, store.ErrNodeNotFound) {
+			protocol.WriteJSONError(w, http.StatusNotFound, "not_found", "Node not found.")
+			return
+		}
+		h.serverError(w, err)
+		return
+	}
+
+	// DB is authoritative; remove the peer and the node's address from every zone
+	// set best-effort. Clearing the set elements is essential: feature-004 IP
+	// recycling means a stale element would let a new node inherit this node's zone
+	// reachability (FR-018). The startup rebuild reconciles any best-effort gap.
+	if err := h.wg.RemovePeer(node.PubKey); err != nil {
 		h.log.Error("failed to remove peer for deleted node", "node_id", nodeID, "error", err.Error())
+	}
+	for _, zid := range zoneIDs {
+		if err := h.netfw.RemoveMember(zid, node.IP); err != nil {
+			h.log.Error("failed to remove set element for deleted node", "node_id", nodeID, "zone_id", zid, "error", err.Error())
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

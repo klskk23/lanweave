@@ -8,6 +8,7 @@ import (
 
 	"lanweave/internal/server/auth"
 	"lanweave/internal/server/config"
+	"lanweave/internal/server/netfw"
 	"lanweave/internal/server/store"
 	"lanweave/internal/server/wg"
 	"lanweave/pkg/protocol"
@@ -22,6 +23,7 @@ type handlers struct {
 	log      *slog.Logger
 	version  string
 	wg       *wg.Server
+	netfw    *netfw.Manager
 	wgConfig config.WireGuardConfig
 }
 

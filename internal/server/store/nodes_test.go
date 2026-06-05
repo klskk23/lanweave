@@ -207,6 +207,26 @@ func TestNodeConcurrentDistinctAddresses(t *testing.T) {
 	}
 }
 
+func TestNodeGetOwned(t *testing.T) {
+	st := newStoreT(t)
+	ctx := context.Background()
+	alice := seedUser(t, st, "alice")
+	bob := seedUser(t, st, "bob")
+	first, last := poolBounds(t)
+	n, _ := st.Nodes().Create(ctx, alice, "laptop", freshPubKey(t), first, last)
+
+	got, err := st.Nodes().GetOwned(ctx, alice, n.ID)
+	if err != nil || got.ID != n.ID || got.IP != n.IP {
+		t.Fatalf("GetOwned(owner): %+v %v", got, err)
+	}
+	if _, err := st.Nodes().GetOwned(ctx, bob, n.ID); !errors.Is(err, store.ErrNodeNotFound) {
+		t.Errorf("GetOwned(non-owner): got %v, want ErrNodeNotFound", err)
+	}
+	if _, err := st.Nodes().GetOwned(ctx, alice, 99999); !errors.Is(err, store.ErrNodeNotFound) {
+		t.Errorf("GetOwned(missing): got %v, want ErrNodeNotFound", err)
+	}
+}
+
 func TestNodePoolExhaustion(t *testing.T) {
 	st := newStoreT(t)
 	ctx := context.Background()

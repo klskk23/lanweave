@@ -1,6 +1,6 @@
 使用中文对话
 <!-- SPECKIT START -->
-Active feature plan: specs/004-node-registration-and-ipam/plan.md
+Active feature plan: specs/005-zones-and-nftables-isolation/plan.md
 
 Project-wide design is frozen in DESIGN.md; slice list is in ROADMAP.md;
 governing principles are in .specify/memory/constitution.md. For the current

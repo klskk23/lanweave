@@ -6,15 +6,18 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/google/nftables"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/time/rate"
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -23,6 +26,7 @@ import (
 	"lanweave/internal/server/api"
 	"lanweave/internal/server/auth"
 	"lanweave/internal/server/config"
+	"lanweave/internal/server/netfw"
 	"lanweave/internal/server/store"
 	"lanweave/internal/server/wg"
 	"lanweave/internal/testutil"
@@ -30,12 +34,13 @@ import (
 )
 
 type nodeHarness struct {
-	t      *testing.T
-	router http.Handler
-	store  *store.Store
-	jwt    *auth.JWTManager
-	wgName string
-	wgCfg  config.WireGuardConfig
+	t       *testing.T
+	router  http.Handler
+	store   *store.Store
+	jwt     *auth.JWTManager
+	wgName  string
+	wgCfg   config.WireGuardConfig
+	nftName string
 }
 
 // newNodeHarness builds a real WireGuard interface + router. Registration adds a
@@ -72,13 +77,25 @@ func newNodeHarness(t *testing.T) *nodeHarness {
 		}
 	})
 
+	nftName := "lwn" + hex.EncodeToString(b)
+	mgr := netfw.NewManager(nftName)
+	if err := mgr.Rebuild(nil, slog.New(slog.NewJSONHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("nft rebuild: %v", err)
+	}
+	t.Cleanup(func() {
+		if conn, e := nftables.New(); e == nil {
+			conn.DelTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: nftName})
+			_ = conn.Flush()
+		}
+	})
+
 	jwtMgr := auth.NewJWTManager(harnessJWTSecret, time.Hour)
 	router := api.NewRouter(api.Options{
 		Version: "test", Limiter: rate.NewLimiter(rate.Limit(10000), 10000),
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Store:  st, JWT: jwtMgr, WG: srv, WGConfig: wgCfg,
+		Store:  st, JWT: jwtMgr, WG: srv, NetFW: mgr, WGConfig: wgCfg,
 	})
-	return &nodeHarness{t: t, router: router, store: st, jwt: jwtMgr, wgName: wgName, wgCfg: wgCfg}
+	return &nodeHarness{t: t, router: router, store: st, jwt: jwtMgr, wgName: wgName, wgCfg: wgCfg, nftName: nftName}
 }
 
 func (h *nodeHarness) seedUser(name string) int64 {
@@ -131,6 +148,50 @@ func (h *nodeHarness) peerExists(pub string) bool {
 		}
 	}
 	return false
+}
+
+func (h *nodeHarness) zoneSetHas(zoneID int64, ip string) bool {
+	h.t.Helper()
+	conn, _ := nftables.New()
+	s, err := conn.GetSetByName(&nftables.Table{Family: nftables.TableFamilyINet, Name: h.nftName}, fmt.Sprintf("zone_%d", zoneID))
+	if err != nil {
+		h.t.Fatalf("get set: %v", err)
+	}
+	elems, _ := conn.GetSetElements(s)
+	want := netip.MustParseAddr(ip).As4()
+	for _, e := range elems {
+		if len(e.Key) == 4 && [4]byte(e.Key) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// US5 — deleting a node clears it from its zones' sets (FR-018), so a recycled
+// address cannot inherit the deleted node's reachability.
+func TestDeleteNodeClearsZoneMembership(t *testing.T) {
+	h := newNodeHarness(t)
+	uid := h.seedUser("alice")
+	tok := h.token(uid)
+	pub := nodePubKey(t)
+
+	var node protocol.NodeResponse
+	decodeJSONBody(t, h.req(http.MethodPost, "/api/v1/nodes", tok, protocol.RegisterNodeRequest{Name: "laptop", WGPubKey: pub}).Body.Bytes(), &node)
+	var zone protocol.ZoneResponse
+	decodeJSONBody(t, h.req(http.MethodPost, "/api/v1/zones", tok, protocol.CreateZoneRequest{Name: "z1", Password: "zone-strong-pw"}).Body.Bytes(), &zone)
+	if r := h.req(http.MethodPost, "/api/v1/zones/z1/join", tok, protocol.JoinZoneRequest{NodeID: node.ID, Password: "zone-strong-pw"}); r.Code != http.StatusOK {
+		t.Fatalf("join: %d", r.Code)
+	}
+	if !h.zoneSetHas(zone.ID, node.IP) {
+		t.Fatal("node not in zone set after join")
+	}
+
+	if r := h.req(http.MethodDelete, "/api/v1/nodes/"+strconv.FormatInt(node.ID, 10), tok, nil); r.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d", r.Code)
+	}
+	if h.zoneSetHas(zone.ID, node.IP) {
+		t.Error("deleted node still in zone set (recycled address would inherit reachability)")
+	}
 }
 
 func nodePubKey(t *testing.T) string {

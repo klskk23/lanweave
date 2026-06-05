@@ -29,13 +29,13 @@ func TestRebuild(t *testing.T) {
 		_ = conn.Flush()
 	})
 
-	if err := m.Rebuild(quietLog()); err != nil {
+	if err := m.Rebuild(nil, quietLog()); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 	assertCleanTable(t, table)
 
 	// Idempotent: a second rebuild over the existing table yields the same state.
-	if err := m.Rebuild(quietLog()); err != nil {
+	if err := m.Rebuild(nil, quietLog()); err != nil {
 		t.Fatalf("rebuild (2nd): %v", err)
 	}
 	assertCleanTable(t, table)
