@@ -137,6 +137,28 @@ func TestZoneListAndParticipant(t *testing.T) {
 	}
 }
 
+func TestZoneUpdatePassword(t *testing.T) {
+	st := newStoreT(t)
+	ctx := context.Background()
+	owner := seedUser(t, st, "alice")
+	z, _ := st.Zones().Create(ctx, owner, "z1", "oldhash")
+	n := seedNode(t, st, owner, "laptop")
+	_ = st.Zones().Join(ctx, z.ID, n.ID)
+
+	if err := st.Zones().UpdatePassword(ctx, z.ID, "newhash"); err != nil {
+		t.Fatalf("update password: %v", err)
+	}
+	got, _ := st.Zones().GetByName(ctx, "z1")
+	if got.PasswordHash != "newhash" {
+		t.Errorf("hash not updated: %q", got.PasswordHash)
+	}
+	// A password change must not touch membership.
+	members, _ := st.Zones().MembersByZone(ctx, z.ID)
+	if len(members) != 1 {
+		t.Errorf("password change altered membership: %d members", len(members))
+	}
+}
+
 func TestZonesForNodeAndRebuild(t *testing.T) {
 	st := newStoreT(t)
 	ctx := context.Background()

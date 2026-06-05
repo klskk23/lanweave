@@ -72,6 +72,44 @@ func TestZoneSetsAndRules(t *testing.T) {
 	}
 }
 
+// TestDeleteZone (privileged) asserts DeleteZone removes BOTH the set and the accept
+// rule that referenced it (a dangling set or stale rule would be a real bug).
+func TestDeleteZone(t *testing.T) {
+	testutil.RequireNetAdmin(t)
+	const table = "lwdelzone"
+	m := netfw.NewManager(table)
+	t.Cleanup(func() {
+		if conn, e := nftables.New(); e == nil {
+			conn.DelTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: table})
+			_ = conn.Flush()
+		}
+	})
+
+	if err := m.Rebuild(nil, quietLog()); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	if err := m.AddZone(3); err != nil {
+		t.Fatalf("add zone: %v", err)
+	}
+	if err := m.AddMember(3, netip.MustParseAddr("100.127.0.7")); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+	if setElementCount(t, table, "zone_3") != 1 || lookupCountForSet(t, table, "zone_3") != 2 {
+		t.Fatal("precondition: set/rule not present")
+	}
+
+	if err := m.DeleteZone(3); err != nil {
+		t.Fatalf("delete zone: %v", err)
+	}
+	conn, _ := nftables.New()
+	if _, err := conn.GetSetByName(&nftables.Table{Family: nftables.TableFamilyINet, Name: table}, "zone_3"); err == nil {
+		t.Error("set still present after DeleteZone")
+	}
+	if lookupCountForSet(t, table, "zone_3") != 0 {
+		t.Error("accept rule still references zone_3 after DeleteZone")
+	}
+}
+
 func setElementCount(t *testing.T, table, set string) int {
 	t.Helper()
 	conn, err := nftables.New()

@@ -24,6 +24,11 @@ type JoinZoneRequest struct {
 	Password string `json:"password"`
 }
 
+// ChangeZonePasswordRequest is the body of PATCH /api/v1/zones/{name}.
+type ChangeZonePasswordRequest struct {
+	Password string `json:"password"`
+}
+
 // LeaveZoneRequest is the body of POST /api/v1/zones/{name}/leave.
 type LeaveZoneRequest struct {
 	NodeID int64 `json:"node_id"`

@@ -101,6 +101,32 @@ ORDER BY c LIMIT 1`
 	return uint32(c), true, nil
 }
 
+// GetByID returns any node by id, regardless of owner (used to resolve a kicked
+// member's address — the owner's authority is over the zone, not the node).
+func (r *NodeRepo) GetByID(ctx context.Context, nodeID int64) (*Node, error) {
+	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at FROM nodes WHERE id = ?`
+	var (
+		n         Node
+		ipVal     int64
+		createdAt string
+	)
+	err := r.db.QueryRowContext(ctx, q, nodeID).
+		Scan(&n.ID, &n.UserID, &n.Name, &n.PubKey, &ipVal, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNodeNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get node by id: %w", err)
+	}
+	n.IP = ipam.Uint32ToAddr(uint32(ipVal))
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse created_at: %w", err)
+	}
+	n.CreatedAt = t
+	return &n, nil
+}
+
 // GetOwned returns the node only if it is owned by userID, else ErrNodeNotFound.
 func (r *NodeRepo) GetOwned(ctx context.Context, userID, nodeID int64) (*Node, error) {
 	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at FROM nodes WHERE id = ? AND user_id = ?`

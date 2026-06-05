@@ -227,6 +227,23 @@ func TestNodeGetOwned(t *testing.T) {
 	}
 }
 
+func TestNodeGetByID(t *testing.T) {
+	st := newStoreT(t)
+	ctx := context.Background()
+	alice := seedUser(t, st, "alice")
+	first, last := poolBounds(t)
+	n, _ := st.Nodes().Create(ctx, alice, "laptop", freshPubKey(t), first, last)
+
+	// GetByID is unscoped (any owner).
+	got, err := st.Nodes().GetByID(ctx, n.ID)
+	if err != nil || got.ID != n.ID || got.IP != n.IP {
+		t.Fatalf("GetByID: %+v %v", got, err)
+	}
+	if _, err := st.Nodes().GetByID(ctx, 99999); !errors.Is(err, store.ErrNodeNotFound) {
+		t.Errorf("GetByID(missing): got %v, want ErrNodeNotFound", err)
+	}
+}
+
 func TestNodePoolExhaustion(t *testing.T) {
 	st := newStoreT(t)
 	ctx := context.Background()

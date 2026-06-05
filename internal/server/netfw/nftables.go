@@ -137,6 +137,58 @@ func (m *Manager) RemoveMember(zoneID int64, ip netip.Addr) error {
 	return nil
 }
 
+// DeleteZone removes a zone's accept rule(s) and then its set. The rule MUST be
+// deleted before the set it references (the kernel rejects deleting a referenced
+// set). The deleted rules are the exact objects returned by GetRules (they carry
+// the handles DelRule needs).
+func (m *Manager) DeleteZone(zoneID int64) error {
+	conn, err := nftables.New()
+	if err != nil {
+		return fmt.Errorf("open nftables: %w", err)
+	}
+	table, chain, err := m.tableAndChain(conn)
+	if err != nil {
+		return err
+	}
+	setName := zoneSetName(zoneID)
+
+	rules, err := conn.GetRules(table, chain)
+	if err != nil {
+		return fmt.Errorf("get rules: %w", err)
+	}
+	deletedRule := false
+	for _, rule := range rules {
+		if ruleReferencesSet(rule, setName) {
+			if err := conn.DelRule(rule); err != nil {
+				return fmt.Errorf("delete zone rule: %w", err)
+			}
+			deletedRule = true
+		}
+	}
+	if deletedRule {
+		if err := conn.Flush(); err != nil {
+			return fmt.Errorf("flush rule delete: %w", err)
+		}
+	}
+
+	if set, err := conn.GetSetByName(table, setName); err == nil {
+		conn.DelSet(set)
+		if err := conn.Flush(); err != nil {
+			return fmt.Errorf("delete set %s: %w", setName, err)
+		}
+	}
+	return nil
+}
+
+func ruleReferencesSet(rule *nftables.Rule, setName string) bool {
+	for _, e := range rule.Exprs {
+		if lk, ok := e.(*expr.Lookup); ok && lk.SetName == setName {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) tableAndChain(conn *nftables.Conn) (*nftables.Table, *nftables.Chain, error) {
 	chains, err := conn.ListChainsOfTableFamily(nftables.TableFamilyINet)
 	if err != nil {

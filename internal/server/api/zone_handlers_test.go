@@ -130,6 +130,14 @@ func (h *zoneHarness) setHas(zoneID int64, ip netip.Addr) bool {
 	return false
 }
 
+// setExists reports whether the zone's nftables set still exists.
+func (h *zoneHarness) setExists(zoneID int64) bool {
+	h.t.Helper()
+	conn, _ := nftables.New()
+	_, err := conn.GetSetByName(&nftables.Table{Family: nftables.TableFamilyINet, Name: h.table}, fmt.Sprintf("zone_%d", zoneID))
+	return err == nil
+}
+
 func TestCreateZone(t *testing.T) {
 	h := newZoneHarness(t)
 	_, tok := h.user("alice")
@@ -298,5 +306,157 @@ func TestListAndMembers(t *testing.T) {
 	// Unknown zone members → 404.
 	if r := h.req(http.MethodGet, "/api/v1/zones/ghostzone/members", aliceTok, nil); r.Code != http.StatusNotFound {
 		t.Errorf("unknown-zone members: %d, want 404", r.Code)
+	}
+}
+
+// ---- Feature 006: owner controls ----
+
+func TestChangeZonePassword(t *testing.T) {
+	h := newZoneHarness(t)
+	uid, tok := h.user("alice")
+	na := h.seedNode(uid, "na")
+	var z protocol.ZoneResponse
+	decodeJSONBody(t, h.req(http.MethodPost, "/api/v1/zones", tok, protocol.CreateZoneRequest{Name: "z1", Password: "orig-strong-pw"}).Body.Bytes(), &z)
+	h.req(http.MethodPost, "/api/v1/zones/z1/join", tok, protocol.JoinZoneRequest{NodeID: na.ID, Password: "orig-strong-pw"})
+
+	// Owner changes the password.
+	if r := h.req(http.MethodPatch, "/api/v1/zones/z1", tok, protocol.ChangeZonePasswordRequest{Password: "new-strong-pw"}); r.Code != http.StatusOK {
+		t.Fatalf("change password: %d %s", r.Code, r.Body.String())
+	}
+	// Existing member is kept (not ejected).
+	var members protocol.ZoneMembersResponse
+	decodeJSONBody(t, h.req(http.MethodGet, "/api/v1/zones/z1/members", tok, nil).Body.Bytes(), &members)
+	if len(members.Members) != 1 {
+		t.Fatalf("password change ejected members: %d remain", len(members.Members))
+	}
+	// A fresh join: old password fails, new password works.
+	nb := h.seedNode(uid, "nb")
+	if r := h.req(http.MethodPost, "/api/v1/zones/z1/join", tok, protocol.JoinZoneRequest{NodeID: nb.ID, Password: "orig-strong-pw"}); r.Code != http.StatusForbidden {
+		t.Errorf("join with old password: %d, want 403", r.Code)
+	}
+	if r := h.req(http.MethodPost, "/api/v1/zones/z1/join", tok, protocol.JoinZoneRequest{NodeID: nb.ID, Password: "new-strong-pw"}); r.Code != http.StatusOK {
+		t.Errorf("join with new password: %d, want 200", r.Code)
+	}
+	// Weak new password → 400; non-owner → 403; missing zone → 404.
+	if r := h.req(http.MethodPatch, "/api/v1/zones/z1", tok, protocol.ChangeZonePasswordRequest{Password: "short"}); r.Code != http.StatusBadRequest {
+		t.Errorf("weak password: %d, want 400", r.Code)
+	}
+	_, bobTok := h.user("bob")
+	if r := h.req(http.MethodPatch, "/api/v1/zones/z1", bobTok, protocol.ChangeZonePasswordRequest{Password: "hijack-attempt"}); r.Code != http.StatusForbidden {
+		t.Errorf("non-owner change: %d, want 403", r.Code)
+	}
+	if r := h.req(http.MethodPatch, "/api/v1/zones/ghost", tok, protocol.ChangeZonePasswordRequest{Password: "whatever-pw"}); r.Code != http.StatusNotFound {
+		t.Errorf("missing zone: %d, want 404", r.Code)
+	}
+}
+
+func TestKickMember(t *testing.T) {
+	h := newZoneHarness(t)
+	aliceID, aliceTok := h.user("alice")
+	bobID, bobTok := h.user("bob")
+	var z1, z2 protocol.ZoneResponse
+	decodeJSONBody(t, h.req(http.MethodPost, "/api/v1/zones", aliceTok, protocol.CreateZoneRequest{Name: "z1", Password: "kick-strong-pw"}).Body.Bytes(), &z1)
+	decodeJSONBody(t, h.req(http.MethodPost, "/api/v1/zones", aliceTok, protocol.CreateZoneRequest{Name: "z2", Password: "kick-strong-pw"}).Body.Bytes(), &z2)
+
+	// Bob's node joins z1 and z2 (cross-user membership).
+	nb := h.seedNode(bobID, "nb")
+	h.req(http.MethodPost, "/api/v1/zones/z1/join", bobTok, protocol.JoinZoneRequest{NodeID: nb.ID, Password: "kick-strong-pw"})
+	h.req(http.MethodPost, "/api/v1/zones/z2/join", bobTok, protocol.JoinZoneRequest{NodeID: nb.ID, Password: "kick-strong-pw"})
+	if !h.setHas(z1.ID, nb.IP) || !h.setHas(z2.ID, nb.IP) {
+		t.Fatal("setup: bob's node not in both zone sets")
+	}
+
+	path := "/api/v1/zones/z1/members/" + fmt.Sprintf("%d", nb.ID)
+	// Owner (alice) kicks bob's node from z1.
+	if r := h.req(http.MethodDelete, path, aliceTok, nil); r.Code != http.StatusNoContent {
+		t.Fatalf("kick: %d", r.Code)
+	}
+	if h.setHas(z1.ID, nb.IP) {
+		t.Error("kicked node still in z1 set")
+	}
+	if !h.setHas(z2.ID, nb.IP) {
+		t.Error("kick from z1 affected z2 membership")
+	}
+	// The node itself still exists (bob can list it).
+	var bobNodes protocol.NodeListResponse
+	decodeJSONBody(t, h.req(http.MethodGet, "/api/v1/nodes", bobTok, nil).Body.Bytes(), &bobNodes)
+	if len(bobNodes.Nodes) != 1 {
+		t.Errorf("kick deleted the node: %d remain", len(bobNodes.Nodes))
+	}
+	// Re-kick → 404.
+	if r := h.req(http.MethodDelete, path, aliceTok, nil); r.Code != http.StatusNotFound {
+		t.Errorf("re-kick: %d, want 404", r.Code)
+	}
+	// Non-owner kick → 403 (bob is not z1's owner).
+	na := h.seedNode(aliceID, "na")
+	h.req(http.MethodPost, "/api/v1/zones/z1/join", aliceTok, protocol.JoinZoneRequest{NodeID: na.ID, Password: "kick-strong-pw"})
+	if r := h.req(http.MethodDelete, "/api/v1/zones/z1/members/"+fmt.Sprintf("%d", na.ID), bobTok, nil); r.Code != http.StatusForbidden {
+		t.Errorf("non-owner kick: %d, want 403", r.Code)
+	}
+}
+
+func TestDeleteZoneOwner(t *testing.T) {
+	h := newZoneHarness(t)
+	uid, tok := h.user("alice")
+	na := h.seedNode(uid, "na")
+	var z1, z2 protocol.ZoneResponse
+	decodeJSONBody(t, h.req(http.MethodPost, "/api/v1/zones", tok, protocol.CreateZoneRequest{Name: "z1", Password: "del-strong-pw"}).Body.Bytes(), &z1)
+	decodeJSONBody(t, h.req(http.MethodPost, "/api/v1/zones", tok, protocol.CreateZoneRequest{Name: "z2", Password: "del-strong-pw"}).Body.Bytes(), &z2)
+	h.req(http.MethodPost, "/api/v1/zones/z1/join", tok, protocol.JoinZoneRequest{NodeID: na.ID, Password: "del-strong-pw"})
+	h.req(http.MethodPost, "/api/v1/zones/z2/join", tok, protocol.JoinZoneRequest{NodeID: na.ID, Password: "del-strong-pw"})
+
+	// Non-owner delete → 403.
+	_, bobTok := h.user("bob")
+	if r := h.req(http.MethodDelete, "/api/v1/zones/z1", bobTok, nil); r.Code != http.StatusForbidden {
+		t.Errorf("non-owner delete: %d, want 403", r.Code)
+	}
+	// Owner deletes z1 → 204; set + rule destroyed.
+	if r := h.req(http.MethodDelete, "/api/v1/zones/z1", tok, nil); r.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d", r.Code)
+	}
+	if h.setExists(z1.ID) {
+		t.Error("z1 set still present after delete")
+	}
+	// z2 unaffected; member node still exists.
+	if !h.setHas(z2.ID, na.IP) {
+		t.Error("deleting z1 affected z2")
+	}
+	var nodes protocol.NodeListResponse
+	decodeJSONBody(t, h.req(http.MethodGet, "/api/v1/nodes", tok, nil).Body.Bytes(), &nodes)
+	if len(nodes.Nodes) != 1 {
+		t.Errorf("delete zone removed the member node: %d remain", len(nodes.Nodes))
+	}
+	// Name released → re-creatable.
+	if r := h.req(http.MethodPost, "/api/v1/zones", tok, protocol.CreateZoneRequest{Name: "z1", Password: "fresh-strong-pw"}); r.Code != http.StatusCreated {
+		t.Errorf("recreate name: %d, want 201", r.Code)
+	}
+	// Missing zone → 404.
+	if r := h.req(http.MethodDelete, "/api/v1/zones/ghost", tok, nil); r.Code != http.StatusNotFound {
+		t.Errorf("delete missing: %d, want 404", r.Code)
+	}
+}
+
+// US4 — a member who is not the owner cannot perform owner ops, but can still view.
+func TestOwnerOpsRequireOwnership(t *testing.T) {
+	h := newZoneHarness(t)
+	_, aliceTok := h.user("alice")
+	bobID, bobTok := h.user("bob")
+	h.req(http.MethodPost, "/api/v1/zones", aliceTok, protocol.CreateZoneRequest{Name: "z1", Password: "authz-strong-pw"})
+	nb := h.seedNode(bobID, "nb")
+	h.req(http.MethodPost, "/api/v1/zones/z1/join", bobTok, protocol.JoinZoneRequest{NodeID: nb.ID, Password: "authz-strong-pw"})
+
+	// Bob is a MEMBER but not the owner → 403 on all three owner ops.
+	if r := h.req(http.MethodPatch, "/api/v1/zones/z1", bobTok, protocol.ChangeZonePasswordRequest{Password: "member-hijack"}); r.Code != http.StatusForbidden {
+		t.Errorf("member change: %d, want 403", r.Code)
+	}
+	if r := h.req(http.MethodDelete, "/api/v1/zones/z1/members/"+fmt.Sprintf("%d", nb.ID), bobTok, nil); r.Code != http.StatusForbidden {
+		t.Errorf("member kick: %d, want 403", r.Code)
+	}
+	if r := h.req(http.MethodDelete, "/api/v1/zones/z1", bobTok, nil); r.Code != http.StatusForbidden {
+		t.Errorf("member delete: %d, want 403", r.Code)
+	}
+	// But bob (participant) can view members.
+	if r := h.req(http.MethodGet, "/api/v1/zones/z1/members", bobTok, nil); r.Code != http.StatusOK {
+		t.Errorf("member view: %d, want 200", r.Code)
 	}
 }

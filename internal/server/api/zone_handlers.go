@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"lanweave/internal/server/auth"
@@ -225,4 +226,122 @@ func (h *handlers) zoneMembers(w http.ResponseWriter, r *http.Request) {
 // is deliberate: the caller IS authenticated, they just lack access to this zone.
 func (h *handlers) zoneOrPassword(w http.ResponseWriter) {
 	protocol.WriteJSONError(w, http.StatusForbidden, "invalid_zone_or_password", "Invalid zone or password.")
+}
+
+// ownedZone resolves the path zone and enforces owner-only access for the owner
+// operations (feature 006): missing zone → 404, authenticated non-owner → 403. It
+// returns (zone, true) only when the caller owns the zone. It writes the error and
+// returns ok=false otherwise. The owner check runs BEFORE any node/membership check
+// so a non-owner never learns whether a node or membership exists.
+func (h *handlers) ownedZone(w http.ResponseWriter, r *http.Request, userID int64) (*store.Zone, bool) {
+	zone, err := h.store.Zones().GetByName(r.Context(), r.PathValue("name"))
+	if err != nil {
+		h.serverError(w, err)
+		return nil, false
+	}
+	if zone == nil {
+		protocol.WriteJSONError(w, http.StatusNotFound, "not_found", "Not found.")
+		return nil, false
+	}
+	if zone.OwnerID != userID {
+		protocol.WriteJSONError(w, http.StatusForbidden, "forbidden", "Only the zone owner may perform this operation.")
+		return nil, false
+	}
+	return zone, true
+}
+
+// changeZonePassword lets the owner rotate the password without ejecting members.
+func (h *handlers) changeZonePassword(w http.ResponseWriter, r *http.Request) {
+	id, ok := IdentityFrom(r.Context())
+	if !ok {
+		protocol.WriteJSONError(w, http.StatusUnauthorized, "unauthorized", "Authentication required.")
+		return
+	}
+	zone, ok := h.ownedZone(w, r, id.UserID)
+	if !ok {
+		return
+	}
+	var req protocol.ChangeZonePasswordRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", "Invalid request body.")
+		return
+	}
+	if len(req.Password) < minZonePasswordLen {
+		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", "Zone password must be at least 8 characters.")
+		return
+	}
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	if err := h.store.Zones().UpdatePassword(r.Context(), zone.ID, hash); err != nil {
+		h.serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// kickMember lets the owner remove any member node from the zone (incl. another
+// user's). Precedence: owner gate (403/404) → node exists (404) → is a member (404).
+func (h *handlers) kickMember(w http.ResponseWriter, r *http.Request) {
+	id, ok := IdentityFrom(r.Context())
+	if !ok {
+		protocol.WriteJSONError(w, http.StatusUnauthorized, "unauthorized", "Authentication required.")
+		return
+	}
+	zone, ok := h.ownedZone(w, r, id.UserID)
+	if !ok {
+		return
+	}
+	nodeID, err := strconv.ParseInt(r.PathValue("node_id"), 10, 64)
+	if err != nil {
+		protocol.WriteJSONError(w, http.StatusNotFound, "not_found", "Not found.")
+		return
+	}
+	node, err := h.store.Nodes().GetByID(r.Context(), nodeID)
+	if err != nil {
+		if errors.Is(err, store.ErrNodeNotFound) {
+			protocol.WriteJSONError(w, http.StatusNotFound, "not_found", "Not found.")
+			return
+		}
+		h.serverError(w, err)
+		return
+	}
+	if err := h.store.Zones().Leave(r.Context(), zone.ID, node.ID); err != nil {
+		if errors.Is(err, store.ErrNotMember) {
+			protocol.WriteJSONError(w, http.StatusNotFound, "not_found", "Not found.")
+			return
+		}
+		h.serverError(w, err)
+		return
+	}
+	// DB is authoritative; remove the set element best-effort (startup reconciles).
+	if err := h.netfw.RemoveMember(zone.ID, node.IP); err != nil {
+		h.log.Error("failed to remove set element on kick", "zone_id", zone.ID, "node_id", node.ID, "error", err.Error())
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteZone lets the owner delete the zone: memberships cascade, the set + rule are
+// destroyed, and the name is released. Member nodes are not deleted.
+func (h *handlers) deleteZone(w http.ResponseWriter, r *http.Request) {
+	id, ok := IdentityFrom(r.Context())
+	if !ok {
+		protocol.WriteJSONError(w, http.StatusUnauthorized, "unauthorized", "Authentication required.")
+		return
+	}
+	zone, ok := h.ownedZone(w, r, id.UserID)
+	if !ok {
+		return
+	}
+	if err := h.store.Zones().Delete(r.Context(), zone.ID); err != nil {
+		h.serverError(w, err)
+		return
+	}
+	// DB is authoritative; destroy the set + rule best-effort (startup reconciles).
+	if err := h.netfw.DeleteZone(zone.ID); err != nil {
+		h.log.Error("failed to delete zone nftables state", "zone_id", zone.ID, "error", err.Error())
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

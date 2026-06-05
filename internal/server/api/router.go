@@ -62,6 +62,11 @@ func NewRouter(opts Options) http.Handler {
 	mux.Handle("POST /api/v1/zones/{name}/leave", AuthRequired(opts.JWT)(http.HandlerFunc(h.leaveZone)))
 	mux.Handle("GET /api/v1/zones/{name}/members", AuthRequired(opts.JWT)(http.HandlerFunc(h.zoneMembers)))
 
+	// Zone owner controls (owner only).
+	mux.Handle("PATCH /api/v1/zones/{name}", AuthRequired(opts.JWT)(http.HandlerFunc(h.changeZonePassword)))
+	mux.Handle("DELETE /api/v1/zones/{name}", AuthRequired(opts.JWT)(http.HandlerFunc(h.deleteZone)))
+	mux.Handle("DELETE /api/v1/zones/{name}/members/{node_id}", AuthRequired(opts.JWT)(http.HandlerFunc(h.kickMember)))
+
 	// Admin-only endpoints.
 	mux.Handle("POST /api/v1/admin/invites",
 		AuthRequired(opts.JWT)(AdminRequired()(http.HandlerFunc(h.createInvite))))

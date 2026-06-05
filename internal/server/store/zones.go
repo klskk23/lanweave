@@ -65,8 +65,17 @@ func (r *ZoneRepo) Create(ctx context.Context, ownerID int64, name, passwordHash
 	return &Zone{ID: id, Name: name, PasswordHash: passwordHash, OwnerID: ownerID, CreatedAt: now}, nil
 }
 
-// Delete removes a zone (cascading its memberships). Used here only to compensate a
-// failed create; user-facing zone deletion is feature 006.
+// UpdatePassword changes only the stored hash. Existing memberships and isolation
+// rules are untouched; the change governs only future joins (feature 006).
+func (r *ZoneRepo) UpdatePassword(ctx context.Context, zoneID int64, passwordHash string) error {
+	if _, err := r.db.ExecContext(ctx, `UPDATE zones SET password_hash = ? WHERE id = ?`, passwordHash, zoneID); err != nil {
+		return fmt.Errorf("update zone password: %w", err)
+	}
+	return nil
+}
+
+// Delete removes a zone (cascading its memberships). Used to compensate a failed
+// create (feature 005) and for owner-initiated zone deletion (feature 006).
 func (r *ZoneRepo) Delete(ctx context.Context, zoneID int64) error {
 	if _, err := r.db.ExecContext(ctx, `DELETE FROM zones WHERE id = ?`, zoneID); err != nil {
 		return fmt.Errorf("delete zone: %w", err)
