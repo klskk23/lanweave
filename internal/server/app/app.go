@@ -67,8 +67,20 @@ func Run(ctx context.Context, opts Options) error {
 		Certificates: []tls.Certificate{cert},
 	}
 
+	jwtTTL, err := time.ParseDuration(cfg.Auth.JWTTTL)
+	if err != nil {
+		return fmt.Errorf("invalid auth.jwt_ttl: %w", err)
+	}
+	jwtMgr := auth.NewJWTManager(cfg.Auth.JWTSecret.Reveal(), jwtTTL)
+
 	limiter := rate.NewLimiter(rate.Limit(cfg.RateLimit.RPS), cfg.RateLimit.Burst)
-	handler := api.NewRouter(api.Options{Version: opts.Version, Limiter: limiter, Logger: log})
+	handler := api.NewRouter(api.Options{
+		Version: opts.Version,
+		Limiter: limiter,
+		Logger:  log,
+		Store:   st,
+		JWT:     jwtMgr,
+	})
 
 	srv := &http.Server{
 		Handler:           handler,

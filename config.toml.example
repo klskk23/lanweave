@@ -31,8 +31,11 @@ mtu         = 1420
 
 [auth]
 # JWT signing secret, >= 32 bytes. Generate with: openssl rand -hex 32
-# (Validated for length here; consumed by feature 002.)
+# Consumed by login/auth: signs session tokens. Changing it invalidates all
+# outstanding tokens (every user must log in again).
 jwt_secret = "REPLACE_WITH_A_32_BYTE_RANDOM_SECRET"
+# Session token lifetime (Go duration). Tokens are not refreshable or revocable;
+# they simply expire after this long.
 jwt_ttl    = "2h"
 
 [admin]

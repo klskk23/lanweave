@@ -25,7 +25,7 @@ Single Go project `lanweave`. Paths are exact and match plan.md's Structure Deci
 
 ## Phase 1: Setup
 
-- [ ] T001 Add dependency `github.com/golang-jwt/jwt/v5` and run `go mod tidy`
+- [X] T001 Add dependency `github.com/golang-jwt/jwt/v5` and run `go mod tidy`
 
 ---
 
@@ -35,17 +35,17 @@ Single Go project `lanweave`. Paths are exact and match plan.md's Structure Deci
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T002 Create migration `internal/server/store/migrations/0002_invites.sql` (invites table per data-model.md; FKs `ON DELETE SET NULL`). The existing `//go:embed migrations/*.sql` already includes it.
-- [ ] T003 [P] Define DTOs in `pkg/protocol/auth.go`: `LoginRequest`, `LoginResponse`, `RegisterRequest`, `RegisterResponse`, `MeResponse`, `CreateInviteResponse`, `InviteListItem`
-- [ ] T004 [P] Add `_txlock=immediate` to the SQLite DSN in `internal/server/store/store.go` so registration transactions take the write lock on `BeginTx` (research.md R2)
-- [ ] T005 [P] Write JWT unit test `internal/server/auth/jwt_test.go`: issue→verify round-trip; tampered signature, expired `exp`, and `alg`≠HS256 (incl. `none`) all rejected; a token signed with secret A fails under a manager with secret B (US4-4) — MUST FAIL before T006
-- [ ] T006 Implement `JWTManager` (`Issue(Claims)`, `Verify(token)`, HS256-pinned via `WithValidMethods`) and `Claims` in `internal/server/auth/jwt.go` (research.md R1)
-- [ ] T007 [P] Add `DummyVerify(password string)` (verify against a fixed PHC constant, discard result) in `internal/server/auth/password.go` with a unit test in `internal/server/auth/password_test.go` (research.md R3)
-- [ ] T008 [P] Add a request-decode helper (`http.MaxBytesReader` ~16 KiB + `json.Decoder` with `DisallowUnknownFields`) in `internal/server/api/decode.go` (research.md R7)
-- [ ] T009 Write auth-middleware unit test `internal/server/api/middleware_auth_test.go`: missing/malformed/expired token → 401; valid non-admin token → `AdminRequired` 403; valid token populates identity in context — MUST FAIL before T010
-- [ ] T010 Implement `AuthRequired`, `AdminRequired`, the typed context key, and `IdentityFrom(ctx)` in `internal/server/api/middleware_auth.go` (research.md R4)
-- [ ] T011 Expand `api.Options` (add `Store *store.Store`, `JWT *auth.JWTManager`) and thread them through `api.NewRouter` in `internal/server/api/router.go`
-- [ ] T012 Wire dependencies in `internal/server/app/app.go`: parse `jwt_ttl`, build `JWTManager` from `cfg.Auth`, pass `store` + `JWT` into `api.NewRouter`
+- [X] T002 Create migration `internal/server/store/migrations/0002_invites.sql` (invites table per data-model.md; FKs `ON DELETE SET NULL`). The existing `//go:embed migrations/*.sql` already includes it.
+- [X] T003 [P] Define DTOs in `pkg/protocol/auth.go`: `LoginRequest`, `LoginResponse`, `RegisterRequest`, `RegisterResponse`, `MeResponse`, `CreateInviteResponse`, `InviteListItem`
+- [X] T004 [P] Ensure deterministic registration concurrency (research.md R2). **Deviation per analyze finding I1**: rather than depend on the driver-specific `_txlock=immediate` DSN param (uncertain on modernc), `Store.Register` is structured write-first — the user INSERT is the transaction's first statement, taking the SQLite write lock immediately and serializing concurrent registrations; the `RowsAffected==1` guard remains the authoritative one-time check. Verified deadlock-free under `-race` (T027). No `store.go` DSN change needed.
+- [X] T005 [P] Write JWT unit test `internal/server/auth/jwt_test.go`: issue→verify round-trip; tampered signature, expired `exp`, and `alg`≠HS256 (incl. `none`) all rejected; a token signed with secret A fails under a manager with secret B (US4-4) — MUST FAIL before T006
+- [X] T006 Implement `JWTManager` (`Issue(Claims)`, `Verify(token)`, HS256-pinned via `WithValidMethods`) and `Claims` in `internal/server/auth/jwt.go` (research.md R1)
+- [X] T007 [P] Add `DummyVerify(password string)` (verify against a fixed PHC constant, discard result) in `internal/server/auth/password.go` with a unit test in `internal/server/auth/password_test.go` (research.md R3)
+- [X] T008 [P] Add a request-decode helper (`http.MaxBytesReader` ~16 KiB + `json.Decoder` with `DisallowUnknownFields`) in `internal/server/api/decode.go` (research.md R7)
+- [X] T009 Write auth-middleware unit test `internal/server/api/middleware_auth_test.go`: missing/malformed/expired token → 401; valid non-admin token → `AdminRequired` 403; valid token populates identity in context — MUST FAIL before T010
+- [X] T010 Implement `AuthRequired`, `AdminRequired`, the typed context key, and `IdentityFrom(ctx)` in `internal/server/api/middleware_auth.go` (research.md R4)
+- [X] T011 Expand `api.Options` (add `Store *store.Store`, `JWT *auth.JWTManager`) and thread them through `api.NewRouter` in `internal/server/api/router.go`
+- [X] T012 Wire dependencies in `internal/server/app/app.go`: parse `jwt_ttl`, build `JWTManager` from `cfg.Auth`, pass `store` + `JWT` into `api.NewRouter`
 
 **Checkpoint**: builds; migration applies; JWT + auth middleware unit-tested; no new endpoints yet.
 
@@ -59,13 +59,13 @@ Single Go project `lanweave`. Paths are exact and match plan.md's Structure Deci
 
 ### Tests for User Story 1 (REQUIRED per constitution Principle II) ⚠️
 
-- [ ] T013 [P] [US1] Acceptance test in `internal/server/api/auth_handlers_test.go`: login(admin)→200+token; `/me`+token→200 with correct `user_id`/`username`/`is_admin`; `/me` with absent and garbage token→401; wrong-password vs unknown-user login both→401 with identical body (SC-005) — MUST FAIL
+- [X] T013 [P] [US1] Acceptance test in `internal/server/api/auth_handlers_test.go`: login(admin)→200+token; `/me`+token→200 with correct `user_id`/`username`/`is_admin`; `/me` with absent and garbage token→401; wrong-password vs unknown-user login both→401 with identical body (SC-005) — MUST FAIL
 
 ### Implementation for User Story 1
 
-- [ ] T014 [US1] Implement the login handler in `internal/server/api/auth_handlers.go`: decode, `GetByUsername`, `VerifyPassword` (or `DummyVerify` on unknown user), issue JWT on success, `invalid_credentials` (401) otherwise — never log the password/token
-- [ ] T015 [US1] Implement the `/me` handler in `internal/server/api/auth_handlers.go`: read identity from context (no DB), return `MeResponse`
-- [ ] T016 [US1] Register routes `POST /api/v1/login` (public) and `GET /api/v1/me` (wrapped in `AuthRequired`) in `internal/server/api/router.go`
+- [X] T014 [US1] Implement the login handler in `internal/server/api/auth_handlers.go`: decode, `GetByUsername`, `VerifyPassword` (or `DummyVerify` on unknown user), issue JWT on success, `invalid_credentials` (401) otherwise — never log the password/token
+- [X] T015 [US1] Implement the `/me` handler in `internal/server/api/auth_handlers.go`: read identity from context (no DB), return `MeResponse`
+- [X] T016 [US1] Register routes `POST /api/v1/login` (public) and `GET /api/v1/me` (wrapped in `AuthRequired`) in `internal/server/api/router.go`
 
 **Checkpoint**: US1 independently functional. T013 green.
 
@@ -79,14 +79,14 @@ Single Go project `lanweave`. Paths are exact and match plan.md's Structure Deci
 
 ### Tests for User Story 2 (REQUIRED per constitution Principle II) ⚠️
 
-- [ ] T017 [P] [US2] Integration test `internal/server/store/invites_test.go` (real temp DB): `Create` returns a unique unguessable code; `List` returns newest-first with status; a code whose creator row is deleted still lists with `created_by` = nil — MUST FAIL
-- [ ] T018 [P] [US2] Acceptance test in `internal/server/api/invite_handlers_test.go`: admin creates code (201) and lists it (unused); non-admin token → 403; no token → 401 — MUST FAIL
+- [X] T017 [P] [US2] Integration test `internal/server/store/invites_test.go` (real temp DB): `Create` returns a unique unguessable code; `List` returns newest-first with status; a code whose creator row is deleted still lists with `created_by` = nil — MUST FAIL
+- [X] T018 [P] [US2] Acceptance test in `internal/server/api/invite_handlers_test.go`: admin creates code (201) and lists it (unused); non-admin token → 403; no token → 401 — MUST FAIL
 
 ### Implementation for User Story 2
 
-- [ ] T019 [US2] Implement `InviteRepo` in `internal/server/store/invites.go`: `Create(ctx, createdByUserID)` (160-bit `crypto/rand` base64url code, unique-retry) and `List(ctx)` (newest-first, LEFT JOIN usernames) per data-model.md
-- [ ] T020 [US2] Implement invite handlers (create, list) in `internal/server/api/invite_handlers.go` mapping to `CreateInviteResponse` / `InviteListItem`; never log the code value
-- [ ] T021 [US2] Register routes `POST /api/v1/admin/invites` and `GET /api/v1/admin/invites` (wrapped in `AuthRequired` + `AdminRequired`) in `internal/server/api/router.go`
+- [X] T019 [US2] Implement `InviteRepo` in `internal/server/store/invites.go`: `Create(ctx, createdByUserID)` (160-bit `crypto/rand` base64url code, unique-retry) and `List(ctx)` (newest-first, LEFT JOIN usernames) per data-model.md
+- [X] T020 [US2] Implement invite handlers (create, list) in `internal/server/api/invite_handlers.go` mapping to `CreateInviteResponse` / `InviteListItem`; never log the code value
+- [X] T021 [US2] Register routes `POST /api/v1/admin/invites` and `GET /api/v1/admin/invites` (wrapped in `AuthRequired` + `AdminRequired`) in `internal/server/api/router.go`
 
 **Checkpoint**: US1 + US2 functional. Admin can mint and review codes.
 
@@ -100,14 +100,14 @@ Single Go project `lanweave`. Paths are exact and match plan.md's Structure Deci
 
 ### Tests for User Story 3 (REQUIRED per constitution Principle II) ⚠️
 
-- [ ] T022 [P] [US3] Integration test `internal/server/store/register_test.go` (real temp DB): happy path creates user + marks code used; already-used code → `ErrInviteInvalid`, no user; nonexistent code → `ErrInviteInvalid`; taken username → `ErrUserExists` and the code remains unused — MUST FAIL
-- [ ] T023 [P] [US3] Acceptance test in `internal/server/api/auth_handlers_test.go`: register(valid code)→201 `{is_admin:false}`; subsequent login works; reuse→422; bad code→422; taken username→409; missing code→400 — MUST FAIL
+- [X] T022 [P] [US3] Integration test `internal/server/store/register_test.go` (real temp DB): happy path creates user + marks code used; already-used code → `ErrInviteInvalid`, no user; nonexistent code → `ErrInviteInvalid`; taken username → `ErrUserExists` and the code remains unused — MUST FAIL
+- [X] T023 [P] [US3] Acceptance test in `internal/server/api/auth_handlers_test.go`: register(valid code)→201 `{is_admin:false}`; subsequent login works; reuse→422; bad code→422; taken username→409; missing code→400 — MUST FAIL
 
 ### Implementation for User Story 3
 
-- [ ] T024 [US3] Implement `Store.Register(ctx, username, passwordHash, code)` in `internal/server/store/register.go`: one transaction — verify code unused, insert non-admin user, `UPDATE invites SET used_by_user_id, used_at WHERE code=? AND used_at IS NULL` requiring `RowsAffected()==1`; typed `ErrInviteInvalid` / `ErrUserExists`; roll back on any failure (research.md R2)
-- [ ] T025 [US3] Implement the register handler in `internal/server/api/auth_handlers.go`: validate username (≤64, non-empty) and password (≥8), `HashPassword`, call `Store.Register`, map errors → 201/400/409/422 per contracts/auth.md; never log the password
-- [ ] T026 [US3] Register route `POST /api/v1/register` (public) in `internal/server/api/router.go`
+- [X] T024 [US3] Implement `Store.Register(ctx, username, passwordHash, code)` in `internal/server/store/register.go`: one transaction — verify code unused, insert non-admin user, `UPDATE invites SET used_by_user_id, used_at WHERE code=? AND used_at IS NULL` requiring `RowsAffected()==1`; typed `ErrInviteInvalid` / `ErrUserExists`; roll back on any failure (research.md R2)
+- [X] T025 [US3] Implement the register handler in `internal/server/api/auth_handlers.go`: validate username (≤64, non-empty) and password (≥8), `HashPassword`, call `Store.Register`, map errors → 201/400/409/422 per contracts/auth.md; never log the password
+- [X] T026 [US3] Register route `POST /api/v1/register` (public) in `internal/server/api/router.go`
 
 **Checkpoint**: Full onboarding loop works: admin mints → invitee registers → invitee logs in.
 
@@ -121,13 +121,13 @@ Single Go project `lanweave`. Paths are exact and match plan.md's Structure Deci
 
 ### Tests for User Story 4 (REQUIRED per constitution Principle II) ⚠️
 
-- [ ] T027 [P] [US4] Concurrency test in `internal/server/store/register_test.go`: launch N goroutines calling `Store.Register` with ONE code and distinct usernames → exactly 1 succeeds, N-1 get `ErrInviteInvalid`, and exactly 1 user row exists (SC-002) — MUST FAIL
-- [ ] T028 [P] [US4] No-secret-log test in `internal/server/api/auth_handlers_test.go`: run register+login with a captured slog buffer; assert the plaintext password, the issued token, and the invite code value never appear (SC-006) — MUST FAIL
+- [X] T027 [P] [US4] Concurrency test in `internal/server/store/register_test.go`: launch N goroutines calling `Store.Register` with ONE code and distinct usernames → exactly 1 succeeds, N-1 get `ErrInviteInvalid`, and exactly 1 user row exists (SC-002) — MUST FAIL
+- [X] T028 [P] [US4] No-secret-log test in `internal/server/api/auth_handlers_test.go`: run register+login with a captured slog buffer; assert the plaintext password, the issued token, and the invite code value never appear (SC-006) — MUST FAIL
 
 ### Implementation for User Story 4
 
-- [ ] T029 [US4] Resolve any failures surfaced by T027/T028: confirm the `BeginTx` + `_txlock=immediate` path makes the race deterministic, and confirm handlers/middleware pass secrets only through redacted/never-logged paths
-- [ ] T030 [US4] Confirm secret-rotation invalidation (US4-4) is covered by the JWT verify test (T005) and that all new endpoints inherit the global rate limiter (FR-021, US4-3) — add an explicit assertion if any gap remains
+- [X] T029 [US4] Resolve any failures surfaced by T027/T028: confirm the `BeginTx` + `_txlock=immediate` path makes the race deterministic, and confirm handlers/middleware pass secrets only through redacted/never-logged paths
+- [X] T030 [US4] Confirm secret-rotation invalidation (US4-4) is covered by the JWT verify test (T005) and that all new endpoints inherit the global rate limiter (FR-021, US4-3) — add an explicit assertion if any gap remains
 
 **Checkpoint**: All four stories functional; adversarial guarantees proven.
 
@@ -135,9 +135,9 @@ Single Go project `lanweave`. Paths are exact and match plan.md's Structure Deci
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T031 [P] Update `config.toml.example` comments to note `jwt_secret`/`jwt_ttl` are now actively consumed by login/auth
-- [ ] T032 Run `make lint` (gofmt + `go vet` + staticcheck) clean; confirm ≥70% coverage on new code (`auth`, `api`, `store` additions) and document any gaps
-- [ ] T033 Execute `quickstart.md` end-to-end against the running server: verify US1–US4 plus SC-002 (one-time), SC-004 (token rejection matrix), SC-005 (no enumeration), SC-006 (no secret logs)
+- [X] T031 [P] Update `config.toml.example` comments to note `jwt_secret`/`jwt_ttl` are now actively consumed by login/auth
+- [X] T032 Run `make lint` (gofmt + `go vet` + staticcheck) clean; confirm ≥70% coverage on new code (`auth`, `api`, `store` additions) and document any gaps
+- [X] T033 Execute `quickstart.md` end-to-end against the running server: verify US1–US4 plus SC-002 (one-time), SC-004 (token rejection matrix), SC-005 (no enumeration), SC-006 (no secret logs)
 
 ---
 

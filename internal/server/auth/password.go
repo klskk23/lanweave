@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -32,6 +33,22 @@ func HashPassword(plain string) (string, error) {
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version, argonMemory, argonIterations, argonParallelism,
 		b64.EncodeToString(salt), b64.EncodeToString(key)), nil
+}
+
+// dummyHash is computed once, lazily, the first time DummyVerify is called.
+var dummyHash = sync.OnceValue(func() string {
+	h, err := HashPassword("lanweave/dummy/timing/constant")
+	if err != nil {
+		panic(err) // HashPassword only fails if crypto/rand fails, which is fatal anyway
+	}
+	return h
+})
+
+// DummyVerify performs an argon2id verification against a fixed internal hash and
+// discards the result. It is called on the unknown-username login path so that
+// response timing does not reveal whether an account exists (no user enumeration).
+func DummyVerify(password string) {
+	_, _ = VerifyPassword(password, dummyHash())
 }
 
 // VerifyPassword reports whether plain matches the encoded argon2id PHC string.
