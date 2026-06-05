@@ -70,6 +70,7 @@ network = "100.127.0.0/16"
 listen_port = 0
 interface = %q
 mtu = 1420
+endpoint = "vpn.example.com:51820"
 
 [nftables]
 table = %q

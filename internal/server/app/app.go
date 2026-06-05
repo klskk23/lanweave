@@ -64,6 +64,12 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer wgServer.Close() // releases handles; leaves the interface up (FR-016)
 
+	// Rebuild client peers from the database so registered nodes survive a restart
+	// (the database is the source of truth, FR-018).
+	if err := rebuildNodePeers(ctx, st.Nodes(), wgServer, log); err != nil {
+		return fmt.Errorf("rebuild node peers: %w", err)
+	}
+
 	cert, err := tls.LoadX509KeyPair(cfg.Server.TLSCert, cfg.Server.TLSKey)
 	if err != nil {
 		return fmt.Errorf("TLS certificate load failed: %w", err)
@@ -81,11 +87,13 @@ func Run(ctx context.Context, opts Options) error {
 
 	limiter := rate.NewLimiter(rate.Limit(cfg.RateLimit.RPS), cfg.RateLimit.Burst)
 	handler := api.NewRouter(api.Options{
-		Version: opts.Version,
-		Limiter: limiter,
-		Logger:  log,
-		Store:   st,
-		JWT:     jwtMgr,
+		Version:  opts.Version,
+		WG:       wgServer,
+		WGConfig: cfg.WireGuard,
+		Limiter:  limiter,
+		Logger:   log,
+		Store:    st,
+		JWT:      jwtMgr,
 	})
 
 	srv := &http.Server{

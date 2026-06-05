@@ -8,24 +8,35 @@ import (
 	"golang.org/x/time/rate"
 
 	"lanweave/internal/server/auth"
+	"lanweave/internal/server/config"
 	"lanweave/internal/server/store"
+	"lanweave/internal/server/wg"
 	"lanweave/pkg/protocol"
 )
 
 // Options configures the router.
 type Options struct {
-	Version string
-	Limiter *rate.Limiter
-	Logger  *slog.Logger
-	Store   *store.Store
-	JWT     *auth.JWTManager
+	Version  string
+	Limiter  *rate.Limiter
+	Logger   *slog.Logger
+	Store    *store.Store
+	JWT      *auth.JWTManager
+	WG       *wg.Server
+	WGConfig config.WireGuardConfig
 }
 
 // NewRouter returns the fully wrapped handler. Middleware order, outermost first:
 // RequestLogger -> Recoverer -> RateLimit -> mux. Protected routes additionally
 // opt into AuthRequired (and AdminRequired) wrappers.
 func NewRouter(opts Options) http.Handler {
-	h := &handlers{store: opts.Store, jwt: opts.JWT, log: opts.Logger, version: opts.Version}
+	h := &handlers{
+		store:    opts.Store,
+		jwt:      opts.JWT,
+		log:      opts.Logger,
+		version:  opts.Version,
+		wg:       opts.WG,
+		wgConfig: opts.WGConfig,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/healthz", healthz(opts.Version))
@@ -36,6 +47,10 @@ func NewRouter(opts Options) http.Handler {
 
 	// Authenticated endpoints.
 	mux.Handle("GET /api/v1/me", AuthRequired(opts.JWT)(http.HandlerFunc(h.me)))
+	mux.Handle("GET /api/v1/server", AuthRequired(opts.JWT)(http.HandlerFunc(h.serverInfo)))
+	mux.Handle("POST /api/v1/nodes", AuthRequired(opts.JWT)(http.HandlerFunc(h.registerNode)))
+	mux.Handle("GET /api/v1/nodes", AuthRequired(opts.JWT)(http.HandlerFunc(h.listNodes)))
+	mux.Handle("DELETE /api/v1/nodes/{id}", AuthRequired(opts.JWT)(http.HandlerFunc(h.deleteNode)))
 
 	// Admin-only endpoints.
 	mux.Handle("POST /api/v1/admin/invites",

@@ -59,12 +59,14 @@ type RateLimitConfig struct {
 	Burst int     `toml:"burst"`
 }
 
-// WireGuardConfig is validated for shape here but consumed by later features.
 type WireGuardConfig struct {
 	Network    string `toml:"network"`
 	ListenPort int    `toml:"listen_port"`
 	Interface  string `toml:"interface"`
 	MTU        int    `toml:"mtu"`
+	// Endpoint is the publicly reachable host:port clients dial over UDP. It may
+	// differ from the API address and from listen_port (NAT). Returned by GET /server.
+	Endpoint string `toml:"endpoint"`
 }
 
 // NFTablesConfig names the dedicated isolation table. The family is always `inet`,
@@ -179,6 +181,12 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("wireguard.network is required"))
 	} else if _, _, err := net.ParseCIDR(c.WireGuard.Network); err != nil {
 		errs = append(errs, fmt.Errorf("wireguard.network %q is not a valid CIDR: %w", c.WireGuard.Network, err))
+	}
+
+	if c.WireGuard.Endpoint == "" {
+		errs = append(errs, errors.New("wireguard.endpoint is required (public host:port clients dial)"))
+	} else if _, _, err := net.SplitHostPort(c.WireGuard.Endpoint); err != nil {
+		errs = append(errs, fmt.Errorf("wireguard.endpoint %q is not host:port: %w", c.WireGuard.Endpoint, err))
 	}
 
 	if strings.ContainsAny(c.NFTables.Table, " \t") {

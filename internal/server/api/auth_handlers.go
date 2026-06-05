@@ -7,7 +7,9 @@ import (
 	"strings"
 
 	"lanweave/internal/server/auth"
+	"lanweave/internal/server/config"
 	"lanweave/internal/server/store"
+	"lanweave/internal/server/wg"
 	"lanweave/pkg/protocol"
 )
 
@@ -15,10 +17,12 @@ const minPasswordLen = 8
 
 // handlers holds the dependencies shared by the control-plane endpoints.
 type handlers struct {
-	store   *store.Store
-	jwt     *auth.JWTManager
-	log     *slog.Logger
-	version string
+	store    *store.Store
+	jwt      *auth.JWTManager
+	log      *slog.Logger
+	version  string
+	wg       *wg.Server
+	wgConfig config.WireGuardConfig
 }
 
 func (h *handlers) serverError(w http.ResponseWriter, err error) {

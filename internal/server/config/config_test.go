@@ -23,7 +23,7 @@ func validConfig(t *testing.T) *config.Config {
 		Server:    config.ServerConfig{Listen: "127.0.0.1:0", TLSCert: cert, TLSKey: key, DataDir: dir},
 		Log:       config.LogConfig{Level: "info"},
 		RateLimit: config.RateLimitConfig{RPS: 100, Burst: 200},
-		WireGuard: config.WireGuardConfig{Network: "100.127.0.0/16", ListenPort: 51820, Interface: "wg-lanweave", MTU: 1420},
+		WireGuard: config.WireGuardConfig{Network: "100.127.0.0/16", ListenPort: 51820, Interface: "wg-lanweave", MTU: 1420, Endpoint: "vpn.example.com:51820"},
 		Auth:      config.AuthConfig{JWTSecret: config.Secret("0123456789abcdef0123456789abcdef"), JWTTTL: "2h"},
 		Admin:     config.AdminConfig{Username: "admin", Password: config.Secret("supersecret")},
 	}
@@ -98,6 +98,7 @@ data_dir = "` + dir + `"
 
 [wireguard]
 network = "100.127.0.0/16"
+endpoint = "vpn.example.com:51820"
 
 [auth]
 jwt_secret = "0123456789abcdef0123456789abcdef"

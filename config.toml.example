@@ -29,6 +29,9 @@ network     = "100.127.0.0/16"
 listen_port = 51820
 interface   = "wg-lanweave"
 mtu         = 1420
+# Public host:port clients dial over UDP to reach the tunnel. May differ from the
+# API address and from listen_port (e.g. behind NAT port-forwarding).
+endpoint    = "vpn.example.com:51820"
 
 [nftables]
 # Bare name of the dedicated isolation table (family is always `inet`, so this is

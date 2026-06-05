@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -101,6 +102,68 @@ func ensureLink(name string) (netlink.Link, bool, error) {
 		return nil, false, fmt.Errorf("re-fetch interface %q after create: %w", name, err)
 	}
 	return link, true, nil
+}
+
+// PeerConfig describes one client node as a WireGuard peer.
+type PeerConfig struct {
+	PublicKey string
+	IP        netip.Addr
+}
+
+// AddPeer adds (or updates) a peer for a node: its public key with the node's
+// single address as the only allowed IP, so the relay routes that address to it.
+func (s *Server) AddPeer(publicKey string, ip netip.Addr) error {
+	peer, err := peerConfig(publicKey, ip)
+	if err != nil {
+		return err
+	}
+	if err := s.wgc.ConfigureDevice(s.name, wgtypes.Config{Peers: []wgtypes.PeerConfig{peer}}); err != nil {
+		return fmt.Errorf("add peer to %s: %w", s.name, err)
+	}
+	return nil
+}
+
+// RemovePeer removes the peer with the given public key.
+func (s *Server) RemovePeer(publicKey string) error {
+	key, err := wgtypes.ParseKey(publicKey)
+	if err != nil {
+		return fmt.Errorf("parse peer key: %w", err)
+	}
+	cfg := wgtypes.Config{Peers: []wgtypes.PeerConfig{{PublicKey: key, Remove: true}}}
+	if err := s.wgc.ConfigureDevice(s.name, cfg); err != nil {
+		return fmt.Errorf("remove peer from %s: %w", s.name, err)
+	}
+	return nil
+}
+
+// ReplacePeers sets the device's peer set to exactly the given peers. Used at
+// startup to rebuild peers from the database (the source of truth).
+func (s *Server) ReplacePeers(peers []PeerConfig) error {
+	cfgs := make([]wgtypes.PeerConfig, 0, len(peers))
+	for _, p := range peers {
+		pc, err := peerConfig(p.PublicKey, p.IP)
+		if err != nil {
+			return err
+		}
+		cfgs = append(cfgs, pc)
+	}
+	if err := s.wgc.ConfigureDevice(s.name, wgtypes.Config{ReplacePeers: true, Peers: cfgs}); err != nil {
+		return fmt.Errorf("replace peers on %s: %w", s.name, err)
+	}
+	return nil
+}
+
+func peerConfig(publicKey string, ip netip.Addr) (wgtypes.PeerConfig, error) {
+	key, err := wgtypes.ParseKey(publicKey)
+	if err != nil {
+		return wgtypes.PeerConfig{}, fmt.Errorf("parse peer key: %w", err)
+	}
+	allowed := net.IPNet{IP: ip.AsSlice(), Mask: net.CIDRMask(32, 32)}
+	return wgtypes.PeerConfig{
+		PublicKey:         key,
+		ReplaceAllowedIPs: true,
+		AllowedIPs:        []net.IPNet{allowed},
+	}, nil
 }
 
 // PublicKey returns the server's WireGuard public key.

@@ -1,12 +1,14 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"path/filepath"
 
 	"lanweave/internal/server/config"
 	"lanweave/internal/server/netfw"
+	"lanweave/internal/server/store"
 	"lanweave/internal/server/wg"
 )
 
@@ -38,4 +40,23 @@ func setupDataPlane(cfg *config.Config, log *slog.Logger) (*wg.Server, error) {
 		return nil, fmt.Errorf("nftables setup: %w", err)
 	}
 	return srv, nil
+}
+
+// rebuildNodePeers restores every registered node as a WireGuard peer from the
+// database, so nodes survive a relay restart (FR-018). The database is the source
+// of truth; this replaces the device's peer set with exactly the stored nodes.
+func rebuildNodePeers(ctx context.Context, repo *store.NodeRepo, srv *wg.Server, log *slog.Logger) error {
+	nodes, err := repo.AllForPeers(ctx)
+	if err != nil {
+		return err
+	}
+	peers := make([]wg.PeerConfig, 0, len(nodes))
+	for _, n := range nodes {
+		peers = append(peers, wg.PeerConfig{PublicKey: n.PubKey, IP: n.IP})
+	}
+	if err := srv.ReplacePeers(peers); err != nil {
+		return err
+	}
+	log.Info("node peers rebuilt from database", "count", len(peers))
+	return nil
 }
