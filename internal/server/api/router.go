@@ -74,6 +74,8 @@ func NewRouter(opts Options) http.Handler {
 		AuthRequired(opts.JWT)(AdminRequired()(http.HandlerFunc(h.createInvite))))
 	mux.Handle("GET /api/v1/admin/invites",
 		AuthRequired(opts.JWT)(AdminRequired()(http.HandlerFunc(h.listInvites))))
+	mux.Handle("DELETE /api/v1/admin/users/{id}",
+		AuthRequired(opts.JWT)(AdminRequired()(http.HandlerFunc(h.deleteUser))))
 
 	mux.HandleFunc("/", notFound)
 
