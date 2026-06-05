@@ -18,7 +18,7 @@
 | 005 | zones-and-nftables-isolation ✅         | 服务端     | 004        | 同 zone 互通，跨 zone drop          |
 | 006 | zone-owner-controls ✅                   | 服务端     | 005        | owner 改密 / 踢人 / 删 zone 生效     |
 | 007 | node-online-status ✅                    | 服务端     | 004        | 客户端连接 → online，3min 静默 → offline |
-| 008 | cascade-deletes                         | 服务端     | 005        | admin 删用户 → 所有 state 清干净     |
+| 008 | cascade-deletes ✅                       | 服务端     | 005        | admin 删用户 → 所有 state 清干净     |
 | 009 | windows-client-skeleton-and-wizard      | 客户端     | 002, 004   | 首次启动 wizard 走完，本机 node 落地 |
 | 010 | windows-client-tunnel                   | 客户端     | 009, 003   | 客户端拉起 WG，能 ping 服务器         |
 | 011 | windows-client-main-panel               | 客户端     | 005, 010   | UI 完成所有 node/zone 管理操作        |
