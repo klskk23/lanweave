@@ -125,7 +125,9 @@ jobs:
         shell: bash
         run: |
           cp lanweave-client.exe wintun.dll packaging/icon.ico packaging/windows/
-          ( cd packaging/windows && "/c/Program Files (x86)/NSIS/makensis.exe" "/DVERSION=${VERSION}" lanweave-client.nsi )
+          # MSYS_NO_PATHCONV=1 stops Git Bash from rewriting the /DVERSION argument (a leading-slash
+          # token) into a Windows path; the makensis.exe path itself still resolves via the /c/ mount.
+          ( cd packaging/windows && MSYS_NO_PATHCONV=1 "/c/Program Files (x86)/NSIS/makensis.exe" "/DVERSION=${VERSION}" lanweave-client.nsi )
           mv "packaging/windows/lanweave-client-setup.exe" "lanweave-client-${VERSION}-setup.exe"
       - name: Portable archive
         shell: pwsh
