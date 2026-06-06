@@ -34,6 +34,15 @@ Windows CI runner. Decisions below resolve them; none remain as NEEDS CLARIFICAT
   - *Leave it manual ("Run as administrator")*: that is the broken status quo this feature fixes.
     Rejected.
 
+> **Revision (2026-06-06, feature 016 — windows-app-icon)**: The "No new build tooling" /
+> dependency-free rationale above no longer holds project-wide. Feature 016 introduces a
+> `windres`-generated `.syso` (`cmd/lanweave-client/resources_windows.syso`) to embed the
+> application icon into the client EXE, reusing the MinGW toolchain already installed in the
+> 014 CI Windows job. This reversal is intentional and is **scoped to the icon resource only**:
+> 013's runtime `runas` self-elevation (Decisions 1–4) remains the elevation mechanism — we did
+> **not** switch to a `requireAdministrator` manifest, so the friendly-decline behavior
+> (FR-004 / US2) is preserved. See `specs/016-windows-app-icon/research.md` Decisions 1 and 8.
+
 ## Decision 2 — Detect elevation with `GetCurrentProcessToken().IsElevated()`
 
 - **Decision**: Determine whether to relaunch using

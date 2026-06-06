@@ -36,6 +36,7 @@ func main() {
 	flag.Parse()
 
 	a := app.NewWithID("com.lanweave.client")
+	a.SetIcon(ui.AppIcon())
 	w := a.NewWindow("lanweave " + version)
 	w.Resize(fyne.NewSize(440, 380))
 

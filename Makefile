@@ -1,7 +1,7 @@
 VERSION ?= 0.1.0+$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
 
-.PHONY: build deb client test lint vet fmt tidy clean
+.PHONY: build deb client icons test lint vet fmt tidy clean
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o ./lanweaved ./cmd/lanweaved
@@ -11,10 +11,17 @@ deb: build
 	mkdir -p dist
 	VERSION="$(VERSION)" nfpm pkg --packager deb --config packaging/nfpm.yaml --target dist/
 
+# Regenerate the app icon assets from packaging/icon.svg: the multi-size icon.ico (EXE + NSIS),
+# internal/client/ui/icon.png (Fyne window icon), and the gitignored resources_windows.syso the
+# Go linker embeds into the EXE. Needs rsvg-convert, icotool, and a MinGW windres.
+icons:
+	./packaging/scripts/gen-icons.sh
+
 # The Windows client GUI is built on Windows (or a Windows cross-toolchain):
 #   go build -tags gui -ldflags "$(LDFLAGS)" -o lanweave-client.exe ./cmd/lanweave-client
 # then packaged with NSIS (packaging/windows/lanweave-client.nsi) alongside wintun.dll.
-client:
+# Depends on `icons` so the EXE resource object is present before building.
+client: icons
 	@echo "Build the Windows client with -tags gui on Windows; see packaging/windows/ and docs/GUIDE.en.md."
 
 test:

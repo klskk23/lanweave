@@ -88,10 +88,18 @@ jobs:
       - name: Derive version from tag
         shell: bash
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-      - name: Install build deps (mingw for cgo, NSIS for the installer)
+      - name: Install build deps (mingw for cgo, NSIS for the installer, librsvg/icoutils for icons)
+        shell: pwsh
         run: |
           choco install mingw -y --no-progress
           choco install nsis -y --no-progress
+          # Rasterization toolchain for `make icons`: rsvg-convert (librsvg) + icotool (icoutils)
+          # via the runner's bundled MSYS2. windres comes from the mingw install above.
+          # If MSYS2 ever lacks icoutils, fall back to `choco install imagemagick` for ICO assembly.
+          C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-librsvg icoutils"
+          # Put the MSYS2 tool dirs on PATH for the later bash steps (rsvg-convert, icotool, windres).
+          "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\msys64\usr\bin"     | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Download and verify Wintun
         shell: pwsh
         run: |
@@ -103,6 +111,9 @@ jobs:
           }
           Expand-Archive wintun.zip -DestinationPath wintun-extracted -Force
           Copy-Item wintun-extracted/wintun/bin/amd64/wintun.dll .
+      - name: Generate app icons (regenerate ICO/PNG/.syso from packaging/icon.svg)
+        shell: bash
+        run: make icons
       - name: Build client (cgo + Fyne)
         shell: bash
         env:
@@ -112,8 +123,8 @@ jobs:
       - name: Package installer (NSIS)
         shell: bash
         run: |
-          cp lanweave-client.exe wintun.dll packaging/windows/
-          ( cd packaging/windows && "/c/Program Files (x86)/NSIS/makensis.exe" lanweave-client.nsi )
+          cp lanweave-client.exe wintun.dll packaging/icon.ico packaging/windows/
+          ( cd packaging/windows && "/c/Program Files (x86)/NSIS/makensis.exe" "/DVERSION=${VERSION}" lanweave-client.nsi )
           mv "packaging/windows/lanweave-client-setup.exe" "lanweave-client-${VERSION}-setup.exe"
       - name: Portable archive
         shell: pwsh

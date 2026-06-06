@@ -69,6 +69,11 @@ GUI 客户端基于 Fyne,需要 **cgo**,因此必须在 **Windows** 上配 C 工
 
 编译客户端:
 
+> **先生成图标资源**:运行 `make icons`(需 `rsvg-convert`、`icotool` 和 MinGW 的 `windres`)。
+> 它从 `packaging/icon.svg` 重新生成被 gitignore 的 `cmd/lanweave-client/resources_windows.syso`
+> (嵌入 EXE 的图标)与 `internal/client/ui/icon.png`(窗口图标)。跳过这步会编出能用但
+> **没有品牌图标**的程序。
+
 ```bat
 set CGO_ENABLED=1
 go build -tags gui -ldflags "-H windowsgui -X main.version=0.1.0" -o lanweave-client.exe .\cmd\lanweave-client
@@ -94,13 +99,15 @@ go build -tags gui -ldflags "-H windowsgui -X main.version=0.1.0" -o lanweave-cl
 ```
 packaging\windows\
 ├── lanweave-client.nsi
+├── icon.ico                 # 来自 `make icons`(packaging\icon.ico 的副本)
 ├── lanweave-client.exe      # 来自 1.2
 └── wintun.dll               # amd64
 ```
 
 ```bat
 cd packaging\windows
-makensis lanweave-client.nsi      :: → lanweave-client-setup.exe
+makensis lanweave-client.nsi                 :: → lanweave-client-setup.exe(版本 0.0.0-dev)
+makensis /DVERSION=0.1.0 lanweave-client.nsi :: 把真实版本号写进「添加删除程序」
 ```
 
 - 安装器请求管理员权限,仅用于装 WinTun 驱动 / 写入 Program Files。

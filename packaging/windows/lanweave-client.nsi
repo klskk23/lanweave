@@ -16,6 +16,13 @@
 
 !define APPNAME "lanweave"
 !define EXE "lanweave-client.exe"
+!define PUBLISHER "lanweave"
+
+; VERSION is passed by the release pipeline (makensis /DVERSION=X.Y.Z); guard it so a bare
+; `makensis lanweave-client.nsi` still compiles for local testing.
+!ifndef VERSION
+    !define VERSION "0.0.0-dev"
+!endif
 
 Name "${APPNAME}"
 OutFile "lanweave-client-setup.exe"
@@ -23,6 +30,10 @@ InstallDir "$PROGRAMFILES64\lanweave"
 RequestExecutionLevel admin          ; elevation required (driver + Program Files)
 Unicode true
 SetCompressor /SOLID lzma
+
+; Installer and uninstaller executable icons (icon.ico is copied next to this script at build).
+Icon "icon.ico"
+UninstallIcon "icon.ico"
 
 Page directory
 Page instfiles
@@ -40,10 +51,14 @@ Section "Install"
 
     WriteUninstaller "$INSTDIR\uninstall.exe"
 
-    ; Add/Remove Programs entry.
+    ; Add/Remove Programs entry. DisplayIcon points at the installed EXE, which carries the
+    ; embedded icon resource (built via windres), so the programs list shows the brand mark.
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayName" "${APPNAME}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "UninstallString" "$INSTDIR\uninstall.exe"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "InstallLocation" "$INSTDIR"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayIcon" "$INSTDIR\${EXE}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayVersion" "${VERSION}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "Publisher" "${PUBLISHER}"
 SectionEnd
 
 Section "Uninstall"

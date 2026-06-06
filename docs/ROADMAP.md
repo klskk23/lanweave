@@ -1,6 +1,6 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善。
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -26,6 +26,7 @@
 | 013 | windows-client-elevation ✅            | 客户端     | 010, 012   | 双击快捷方式启动即弹 UAC，建网卡成功  |
 | 014 | ci-cd-build-and-release ✅              | 运维       | 012, 013   | 打 v* tag → 测试门禁 → 出 .deb+安装器 → 自动建 draft Release |
 | 015 | zone-create-auto-join ✅                | 客户端/服务端 | 005, 011   | 创建 zone 后本机 node 自动入组,无需二次 join         |
+| 016 | windows-app-icon                        | 客户端/运维 | 014        | EXE / Fyne 窗口 / 安装器 / 卸载器 / ARP 5 处均显示 lanweave 图标 |
 
 ---
 
@@ -292,6 +293,34 @@
 **不做**
 - 改动「加入他人 zone」流程(仍走 join,需密码)。
 - nft 中途失败→补偿删 zone 的确定性注入测试(不好可靠触发,与现有同类补偿路径未单测保持一致)。
+
+---
+
+### 016 — windows-app-icon
+**背景**
+- 014 把 Windows 客户端 + NSIS 安装器自动化打包出来后,实战发现五个用户感知的图标位置(EXE 文件资源、Fyne 运行时窗口、安装器 EXE、卸载器 EXE、控制面板「添加删除程序」)全是 Windows 默认空白,品牌识别为零。
+- `packaging/icon.svg`(256×256 矢量,深蓝底 + 青色花纹)已就位,缺一条「SVG → 多分辨率 ICO/PNG → 嵌入 EXE/Fyne/NSIS」的稳定路径。
+
+**范围**
+- **SVG → 栅格**:新增 `packaging/scripts/gen-icons.sh`,用 `rsvg-convert`(librsvg)+ `icotool`(icoutils)产 `packaging/icon.ico`(含 16/32/48/256 四张)+ `internal/client/ui/icon.png`(256×256,给 Fyne)。两份产物入仓。
+- **EXE 资源图标(W1 windres)**:复用 014 已装的 mingw 工具链,新增 `windres` 一步从 `packaging/windows/icon.rc`(3 行)+ `icon.ico` 生成 `cmd/lanweave-client/resources_windows.syso`,`go build` 自动链接。SYSO 不入仓(`.gitignore`),`make icons` 即时生成,`make client` 通过 Makefile 依赖防遗漏。
+- **Fyne 窗口图标**:`internal/client/ui/icon.go` 用 `//go:embed icon.png` 嵌字节,导出 `AppIcon() fyne.Resource`;`cmd/lanweave-client/main.go` 在 `app.NewWithID` 后、`a.NewWindow` 前调一行 `a.SetIcon(ui.AppIcon())`(跨平台生效,Linux/Mac GUI 也带,接受)。
+- **NSIS 安装器/卸载器 + ARP 元数据**:`lanweave-client.nsi` 加 `Icon "icon.ico"`、`UninstallIcon "icon.ico"`;Uninstall 注册表段补 `DisplayIcon "$INSTDIR\${EXE}"`、`DisplayVersion`、`Publisher`。`.nsi` 接收 `/D VERSION=...`,`release.yml` `makensis` 调用传入。
+- **修订 013 research.md**:本期为图标引入 `.syso` 工具链,推翻 013 Decision 1 「无新构建工具」原则;运行时 `runas` 抬升路径不动,research.md 追加一节修订记录。
+- **CI**:`release.yml` Windows job 增装 librsvg / icoutils 的 chocolatey 等价物;Build client step 改为 `make icons && go build`。
+
+**验收**
+- CI `release.yml` 打 `vX.Y.Z` tag 跑完出包,人工 verify 矩阵(写在 016 的 `quickstart.md`)逐一对 5 个位置肉眼检查:安装器 EXE 图标 / 装好后 `lanweave-client.exe` 文件图标 / Start menu 与桌面快捷方式 / 运行客户端时 Fyne 窗口标题栏 + Windows 任务栏 / 控制面板「添加删除程序」里 lanweave 那行图标,全部显示 lanweave 图标。
+- `make icons` 在 Linux / Windows 上重生成产物,产出可被 `file` 识别为合法 PNG/ICO/COFF,可读 SVG diff 与新 PNG 渲染肉眼一致。
+- `internal/client/ui/icon_test.go` 单测(无头,无 GUI tag)断言 `AppIcon().Content()` 非空 + 前 8 字节为 PNG magic `89 50 4E 47 0D 0A 1A 0A`。
+- `unshare -rUn go test ./...` 仍全绿(本期不动 SQLite/nftables/WireGuard,宪法 II 不受影响)。
+
+**不做**
+- NSIS Modern UI 2 升级(welcome / finish 页 + welcome 宣传图)——另一项目。
+- 代码签名 / Windows Authenticode(沿用 014 暂缓策略)。
+- 自动化 PE 资源段解析校验(5 个位置人工肉眼覆盖,ROI 低)。
+- SVG 改动后强制 CI 重生成 ICO/PNG 的防漂移钩子(信任 review)。
+- `gen-icons.sh` 产物哈希校验(`rsvg-convert` 跨版本字节不稳,反而引入「换版本就 fail」)。
 
 ---
 

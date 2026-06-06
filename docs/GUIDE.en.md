@@ -76,6 +76,12 @@ Verify: `gcc --version` and `go version` both work in a fresh terminal.
 
 Build the client:
 
+> **First generate the icon resources**: run `make icons` (needs `rsvg-convert`, `icotool`, and
+> a MinGW `windres`). It regenerates, from `packaging/icon.svg`, the gitignored
+> `cmd/lanweave-client/resources_windows.syso` (the embedded EXE icon) and
+> `internal/client/ui/icon.png` (the window icon). Skipping this yields a working but
+> **unbranded** build.
+
 ```bat
 set CGO_ENABLED=1
 go build -tags gui -ldflags "-H windowsgui -X main.version=0.1.0" -o lanweave-client.exe .\cmd\lanweave-client
@@ -104,13 +110,15 @@ directory** (the script references the exe/dll by relative name):
 ```
 packaging\windows\
 ├── lanweave-client.nsi
+├── icon.ico                 # from `make icons` (copy of packaging\icon.ico)
 ├── lanweave-client.exe      # from 1.2
 └── wintun.dll               # amd64
 ```
 
 ```bat
 cd packaging\windows
-makensis lanweave-client.nsi      :: → lanweave-client-setup.exe
+makensis lanweave-client.nsi                 :: → lanweave-client-setup.exe (version 0.0.0-dev)
+makensis /DVERSION=0.1.0 lanweave-client.nsi :: stamp a real version into Add/Remove Programs
 ```
 
 - The installer requests admin only to install the WinTun driver / write to Program Files.
