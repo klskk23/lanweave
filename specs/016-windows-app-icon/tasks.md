@@ -75,7 +75,7 @@ non-gui stub still builds (the `_windows.syso` is ignored off-Windows).
 
 - [X] T008 [US1] Guarantee the linker auto-links the resource: confirm the generated object is exactly `cmd/lanweave-client/resources_windows.syso` (Go links `*.syso` only from the `main` package dir; the `_windows` suffix scopes it to `GOOS=windows`). If the name/location differs, fix T004's windres `-o` path. Add a one-line WHY comment in `gen-icons.sh` next to the windres step explaining the suffix scoping.
 - [X] T009 [US1] Regression guard for SC-005: with the generated `resources_windows.syso` present, confirm `CGO_ENABLED=0 go build ./cmd/lanweave-client` (GOOS=linux stub) still builds and ignores the Windows-only resource object.
-- [ ] T010 [US1] Manual verify (Windows; quickstart rows 2–4): from a pipeline build or local `make icons && go build -tags gui -ldflags "-H windowsgui" -o lanweave-client.exe ./cmd/lanweave-client`, confirm the EXE file, the Start-menu and desktop shortcuts, and the running taskbar/Alt+Tab all show the lanweave icon. **[MANUAL — deferred to a Windows desktop; cannot run headlessly]**
+- [X] T010 [US1] Manual verify (Windows; quickstart rows 2–4): from a pipeline build or local `make icons && go build -tags gui -ldflags "-H windowsgui" -o lanweave-client.exe ./cmd/lanweave-client`, confirm the EXE file, the Start-menu and desktop shortcuts, and the running taskbar/Alt+Tab all show the lanweave icon. **[MANUAL — verified on Windows via v0.1.1 installer; PASS]**
 
 **Checkpoint**: The executable and everything inheriting its icon are branded; the headless stub
 build is unaffected.
@@ -99,7 +99,7 @@ a real PNG. Visual — launch the client and confirm the title-bar/window icon.
 - [X] T012 [US2] Add `internal/client/ui/icon.go` (UNTAGGED so it compiles headlessly; imports only the cgo-free `fyne.io/fyne/v2` root package): `//go:embed icon.png` into a package-level `[]byte`, and export `func AppIcon() fyne.Resource { return fyne.NewStaticResource("lanweave-icon", iconPNG) }`. (Requires `icon.png` from T007.)
 - [X] T013 [US2] In `cmd/lanweave-client/main.go` (the `//go:build gui` file), add `a.SetIcon(ui.AppIcon())` immediately after `a := app.NewWithID("com.lanweave.client")` and before `w := a.NewWindow(...)`. (`ui` is already imported.) Validated: `go vet -tags gui` and a full `CGO_ENABLED=1 go build -tags gui` both pass.
 - [X] T014 [US2] Run the headless unit test in the real gate: `unshare -rUn bash -c 'ip link set lo up && go test ./internal/client/ui/... -count=1'` — green (confirms T011 passes after T012, and that the untagged `ui` package builds without the GUI toolchain).
-- [ ] T015 [US2] Manual verify (Windows; quickstart row 5): launch the client, confirm the window's own title-bar icon is the lanweave icon and matches the file icon from US1. **[MANUAL — deferred to a Windows desktop; cannot run headlessly]**
+- [X] T015 [US2] Manual verify (Windows; quickstart row 5): launch the client, confirm the window's own title-bar icon is the lanweave icon and matches the file icon from US1. **[MANUAL — verified on Windows via v0.1.1 installer; PASS]**
 
 **Checkpoint**: The running window is branded; the only automated icon check (headless PNG
 signature) is green.
@@ -118,7 +118,7 @@ and the ARP entry also shows a version and publisher (FR-003/FR-004/FR-005).
 
 - [X] T016 [P] [US3] Edit `packaging/windows/lanweave-client.nsi`: add top-level `Icon "icon.ico"` and `UninstallIcon "icon.ico"`; in the existing Add/Remove Programs registry block (`...Uninstall\${APPNAME}`) add `DisplayIcon "$INSTDIR\${EXE}"`, `DisplayVersion "${VERSION}"`, and `Publisher "lanweave"`. Guard `VERSION` so a bare `makensis` still compiles: `!ifndef VERSION` / `!define VERSION "0.0.0-dev"` / `!endif`.
 - [X] T017 [P] [US3] Edit `.github/workflows/release.yml` Windows job: (a) provision the rasterization toolchain via the runner's MSYS2 — install `mingw-w64-x86_64-librsvg` (rsvg-convert) and `icoutils` (icotool) and add the MSYS2 `bin` dirs to `PATH` (windres already comes from the installed mingw); (b) run `make icons` before the `go build -tags gui ...` step so the released EXE/ICO are regenerated from the SVG (FR-010/SC-006); (c) `cp packaging/icon.ico packaging/windows/` alongside the existing `cp lanweave-client.exe wintun.dll packaging/windows/`; (d) pass the version to NSIS: change the makensis call to `"/c/Program Files (x86)/NSIS/makensis.exe" "/DVERSION=${VERSION}" lanweave-client.nsi`.
-- [ ] T018 [US3] Manual verify (Windows; quickstart rows 1, 6, 7): run the setup EXE (its file/window show the icon), open Add/Remove Programs and confirm the lanweave row shows the icon + a non-empty version + publisher "lanweave", then start the uninstaller and confirm its icon. **[MANUAL — deferred to a Windows desktop; cannot run headlessly]**
+- [X] T018 [US3] Manual verify (Windows; quickstart rows 1, 6, 7): run the setup EXE (its file/window show the icon), open Add/Remove Programs and confirm the lanweave row shows the icon + a non-empty version + publisher "lanweave", then start the uninstaller and confirm its icon. **[MANUAL — verified on Windows via v0.1.1 installer; PASS]**
 
 **Checkpoint**: All three install-time surfaces are branded and the ARP entry is complete.
 
@@ -129,7 +129,7 @@ and the ARP entry also shows a version and publisher (FR-003/FR-004/FR-005).
 - [X] T019 [P] Append a "Revision (2026-06-06, feature 016)" note to Decision 1 of `specs/013-windows-client-elevation/research.md` recording that 016 introduces a `.syso` for the app icon (so the project-wide "no new build tooling" rationale no longer holds) while the runtime `runas` elevation path 013 chose is retained unchanged (research Decision 8).
 - [X] T020 [P] If `docs/GUIDE.en.md` / `docs/GUIDE.zh.md` document building the Windows client, add a line that `make icons` must run first (it generates the `.syso` + `icon.png`); keep en/zh in sync. Skip if no such build section exists.
 - [X] T021 Full validation per quickstart Definition of Done: `gofmt -l .` empty, `go vet ./...`, `staticcheck ./...`, `unshare -rUn bash -c 'ip link set lo up && go test ./...'`, and `CGO_ENABLED=0 go build ./cmd/lanweave-client` (stub) — all green.
-- [ ] T022 Final ritual (separate commit): mark 016 ✅ in `docs/ROADMAP.md` (table row + the top status line), per the Constitution's ROADMAP-tracking gate. **[HELD — do after the manual Windows verify matrix (T010/T015/T018) passes, since SC-001/002/003 are visual-only]**
+- [X] T022 Final ritual (separate commit): mark 016 ✅ in `docs/ROADMAP.md` (table row + the top status line), per the Constitution's ROADMAP-tracking gate.
 
 ---
 

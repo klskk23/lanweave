@@ -26,7 +26,7 @@
 | 013 | windows-client-elevation ✅            | 客户端     | 010, 012   | 双击快捷方式启动即弹 UAC，建网卡成功  |
 | 014 | ci-cd-build-and-release ✅              | 运维       | 012, 013   | 打 v* tag → 测试门禁 → 出 .deb+安装器 → 自动建 draft Release |
 | 015 | zone-create-auto-join ✅                | 客户端/服务端 | 005, 011   | 创建 zone 后本机 node 自动入组,无需二次 join         |
-| 016 | windows-app-icon                        | 客户端/运维 | 014        | EXE / Fyne 窗口 / 安装器 / 卸载器 / ARP 5 处均显示 lanweave 图标 |
+| 016 | windows-app-icon ✅                      | 客户端/运维 | 014        | EXE / Fyne 窗口 / 安装器 / 卸载器 / ARP 5 处均显示 lanweave 图标 |
 
 ---
 
