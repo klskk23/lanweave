@@ -186,6 +186,19 @@ func (c *Client) KickMember(name string, nodeID int64) error {
 	return err
 }
 
+// DeleteNode removes one of the caller's own devices (used by logout). The server enforces
+// ownership, so a foreign or unknown id is a 404 (mapped to ErrZoneNotFound), never another
+// user's node. Expects 204 No Content.
+func (c *Client) DeleteNode(nodeID int64) error {
+	_, err := c.do(http.MethodDelete, fmt.Sprintf("/api/v1/nodes/%d", nodeID), true, nil, nil)
+	return err
+}
+
+// Insecure reports whether this client was built with TLS certificate verification disabled
+// (via WithInsecure / the --insecure CLI flag). Used to drive the persistent "certificate
+// not verified" indicator.
+func (c *Client) Insecure() bool { return c.insecure }
+
 // do performs a request, decoding into out (when non-nil) and mapping failures to typed
 // errors based on the HTTP status and the error envelope's code.
 func (c *Client) do(method, path string, auth bool, body, out any) (int, error) {

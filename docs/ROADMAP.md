@@ -1,6 +1,6 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐。
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -27,6 +27,7 @@
 | 014 | ci-cd-build-and-release ✅              | 运维       | 012, 013   | 打 v* tag → 测试门禁 → 出 .deb+安装器 → 自动建 draft Release |
 | 015 | zone-create-auto-join ✅                | 客户端/服务端 | 005, 011   | 创建 zone 后本机 node 自动入组,无需二次 join         |
 | 016 | windows-app-icon ✅                      | 客户端/运维 | 014        | EXE / Fyne 窗口 / 安装器 / 卸载器 / ARP 5 处均显示 lanweave 图标 |
+| 017 | client-logout-and-tls-optin ✅          | 客户端     | 004, 011   | 退出登录(断连 + 注销本机 node + 回填服务器 URL);证书错误时弹窗可选「继续(不安全)」,会话级不持久 |
 
 ---
 
@@ -321,6 +322,37 @@
 - 自动化 PE 资源段解析校验(5 个位置人工肉眼覆盖,ROI 低)。
 - SVG 改动后强制 CI 重生成 ICO/PNG 的防漂移钩子(信任 review)。
 - `gen-icons.sh` 产物哈希校验(`rsvg-convert` 跨版本字节不稳,反而引入「换版本就 fail」)。
+
+---
+
+### 017 — client-logout-and-tls-optin
+**背景**
+- 011 主面板交付后，客户端缺两块体验：(1) 没有「退出登录」——onboard 一旦完成就绑死在某台服务器/账号，想换服务器只能手动清 state.json/keyring；(2) 证书校验失败（自签 / 内网 CA）时，`--insecure` 只能命令行传入（009 / DESIGN §275「不在 UI 暴露」），普通用户在 GUI 里撞上 `ErrUntrustedCert` 就卡死、无路可走。
+- 原 017 还含「删除 node」，grill 阶段判定其与「退出登录」对本机的处理大面积重叠、独立价值有限，已剔除；代价：够不着的旧 / 丢失设备 node 无法远程撤销，作为**接受的限制**记录。
+
+**范围**
+- **退出登录**：
+  - Home 面板账户 / 设置区（或右上溢出菜单）新增「退出登录」按钮，远离主操作防误点。
+  - 点击 → **普通确认弹窗**，文案点明「断开连接 + 移除本设备在该服务器的节点 + 需重填服务器地址」。
+  - 确认后原子执行：拆 WG 隧道 → 调 `DELETE /api/v1/nodes/{id}` 注销本机 node → 清 keyring（session token + 设备私钥）→ `state.Clear()` → 回到 wizard `stepServer`（可重填服务端 URL）。
+  - `apiclient` 新增 `DeleteNode`（仅 logout 内部调用）；`panel` 的 `api` interface 同步加。
+  - 注：删 node 既已剔除，logout 的注销即**唯一 node 清理路径**，故必须「注销」而非「留 node」（留则每次退登造一个无人可清的孤儿）。
+- **insecure-TLS 可交互（被动 opt-in，非常驻勾选）**：
+  - wizard 与 Home 两处：连接命中 `ErrUntrustedCert` 时弹窗「证书无法验证，是否仍继续?（不安全）」；用户确认才以 `WithInsecure()` 重建该会话 client 重试。
+  - **不持久化**：insecure 仅当前进程内存生效，不写 state.json；重启回安全默认。
+  - 保留 `--insecure` CLI flag（命令行传入则一开始即跳过校验，行为不变）。
+  - 处于 insecure 会话时，Home 常驻「⚠ 证书未验证」提示条。
+- **修订 DESIGN.md（同 PR）**：§275、§360（§11 风险登记）解除「忽略证书验证不在 UI 暴露」字面禁令，改记新口径——UI 仅被动触发、需显式确认、会话级不落盘、常驻警告，保留「防无脑勾选」精神。
+
+**验收**
+- 退出登录：Home 点退出 → 确认 → 隧道断（`ipconfig` 网卡消失）、服务端 `wg show` / DB 中本机 node 消失、keyring 清空、回到填服务器 URL 的 wizard 首步；重走 wizard 可注册到同一或不同服务器。
+- 服务端集成测试（真 nft/wg/SQLite，`unshare -rUn`）：logout 调 DeleteNode 后该 node 的 IP 释放、wg peer 删除、zone set 元素清除（复用 008 级联路径）。
+- insecure 交互：对自签服务器，wizard/Home 撞证书错误 → 弹窗 → 选继续 → 连接成功且出现「⚠ 证书未验证」；不选则连接失败、不静默放行；重启后再连默认仍校验（未持久）。
+- `panel.Controller` + fake `api`（HTTP 边界）headless 测覆盖 logout 编排与证书弹窗判定；GUI 弹窗 / 提示条 `//go:build gui`，Windows 手工核对。
+
+**待 plan 阶段确认**
+- 服务端 `DELETE /api/v1/nodes/{id}` 是否已实现 + owner 校验（只能删自己的 node）。
+- 客户端 WG 隧道 teardown 入口（对称于 013 提权建网卡路径）。
 
 ---
 

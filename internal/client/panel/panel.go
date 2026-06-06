@@ -29,9 +29,14 @@ type api interface {
 	ChangeZonePassword(name, password string) error
 	DeleteZone(name string) error
 	KickMember(name string, nodeID int64) error
+	DeleteNode(nodeID int64) error
 }
 
 var _ api = (*apiclient.Client)(nil)
+
+// errNotRegistered means this machine's device is not in the caller's node list (so logout
+// can distinguish "already gone" from a list/network failure).
+var errNotRegistered = errors.New("this device is not registered with the server")
 
 // View models rendered by the Fyne panel.
 type (
@@ -56,16 +61,25 @@ type (
 
 // Controller drives the management panel.
 type Controller struct {
-	api    api
-	record state.Record
-	keys   keyring.Store
+	api       api
+	record    state.Record
+	keys      keyring.Store
+	statePath string
+	insecure  bool
 }
 
 // New builds a controller bound to an API client, the setup record (to identify this
-// machine), and the secure store (for the cached session token).
-func New(a api, record state.Record, keys keyring.Store) *Controller {
-	return &Controller{api: a, record: record, keys: keys}
+// machine), and the secure store (for the cached session token). statePath lets Logout
+// clear the local state file; insecure seeds the "certificate not verified" indicator for
+// the --insecure CLI-flag case.
+func New(a api, record state.Record, keys keyring.Store, statePath string, insecure bool) *Controller {
+	return &Controller{api: a, record: record, keys: keys, statePath: statePath, insecure: insecure}
 }
+
+// Insecure reports whether this session is bypassing TLS certificate verification (set from
+// the --insecure CLI flag at construction, or flipped by UseInsecureClient after the user
+// accepts the reactive opt-in). Drives the persistent "certificate not verified" indicator.
+func (c *Controller) Insecure() bool { return c.insecure }
 
 // LoadSession restores a cached session and validates it. It returns needSignIn=true when
 // there is no cached token or the token has expired; a non-nil err is a transient problem
@@ -180,6 +194,48 @@ func (c *Controller) DeleteZone(name string) error {
 	return c.api.DeleteZone(name)
 }
 
+// Logout deregisters this device on the server (best-effort) and ALWAYS clears the local
+// session token, device private key, and state record — so an offline user can still leave.
+// remoteRemoved reports whether the server-side node is gone (confirmed removed or already
+// absent); err is non-nil only when a local clear failed.
+func (c *Controller) Logout() (remoteRemoved bool, err error) {
+	remoteRemoved = c.removeRemoteNode()
+	localErr := errors.Join(
+		c.keys.Delete(keyring.SessionTokenName),
+		c.keys.Delete(keyring.DeviceKeyName),
+		state.Clear(c.statePath),
+	)
+	return remoteRemoved, localErr
+}
+
+// removeRemoteNode best-effort deletes this device's own node. It returns true when the
+// server confirmed removal or the node was already absent, and false when the server was
+// unreachable or the delete failed (so the UI can warn the node may still be registered).
+func (c *Controller) removeRemoteNode() bool {
+	id, err := c.thisMachineNodeID()
+	if err != nil {
+		// Not in the list → already gone (removed); a list (network) failure → not removed.
+		return errors.Is(err, errNotRegistered)
+	}
+	if derr := c.api.DeleteNode(id); derr != nil {
+		// A 404 (raced, already gone) counts as removed; network/5xx does not.
+		return errors.Is(derr, apiclient.ErrZoneNotFound)
+	}
+	return true
+}
+
+// UseInsecureClient swaps in a freshly built API client that bypasses TLS verification (the
+// caller constructs it with apiclient.WithInsecure after the user accepts the reactive
+// opt-in), flips the insecure indicator, and re-applies the cached session token so the
+// signed-in session survives the swap.
+func (c *Controller) UseInsecureClient(a api) {
+	if tok, gerr := c.keys.Get(keyring.SessionTokenName); gerr == nil && len(tok) > 0 {
+		a.SetToken(string(tok))
+	}
+	c.api = a
+	c.insecure = true
+}
+
 func (c *Controller) isThisMachine(name, ip string) bool {
 	if c.record.NodeName != "" && name == c.record.NodeName {
 		return true
@@ -199,5 +255,5 @@ func (c *Controller) thisMachineNodeID() (int64, error) {
 			return n.ID, nil
 		}
 	}
-	return 0, errors.New("this device is not registered with the server")
+	return 0, errNotRegistered
 }

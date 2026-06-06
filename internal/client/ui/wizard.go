@@ -22,10 +22,11 @@ import (
 // controller. Every step offers Back and Cancel, network actions show progress, errors are
 // human-readable, and there is deliberately no control to weaken certificate verification.
 type Wizard struct {
-	win       fyne.Window
-	statePath string
-	keys      keyring.Store
-	insecure  bool
+	win          fyne.Window
+	statePath    string
+	keys         keyring.Store
+	insecure     bool // live value; may be flipped true by the reactive cert opt-in
+	origInsecure bool // the original --insecure CLI value; used to seed a post-logout restart
 
 	serverURL string
 	mode      onboard.AuthMode
@@ -38,7 +39,7 @@ type Wizard struct {
 // NewWizard builds a wizard. The insecure flag comes only from the command line, never the
 // UI; it is threaded into the API client's TLS settings.
 func NewWizard(win fyne.Window, statePath string, keys keyring.Store, insecure bool) *Wizard {
-	return &Wizard{win: win, statePath: statePath, keys: keys, insecure: insecure, mode: onboard.SignIn}
+	return &Wizard{win: win, statePath: statePath, keys: keys, insecure: insecure, origInsecure: insecure, mode: onboard.SignIn}
 }
 
 // Start shows the first step.
@@ -58,7 +59,15 @@ func (z *Wizard) render(title string, body fyne.CanvasObject, onBack, onNext fun
 	next.Importance = widget.HighImportance
 	bar := container.NewBorder(nil, nil, left, next)
 
-	z.win.SetContent(container.NewBorder(header, bar, nil, nil, container.NewVBox(body)))
+	// Persistent "certificate not verified" indicator while this session bypasses TLS
+	// verification — whether via the --insecure CLI flag or an accepted reactive opt-in
+	// (FR-013/014).
+	var topObj fyne.CanvasObject = header
+	if z.insecure {
+		warn := widget.NewLabelWithStyle("⚠ certificate not verified", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+		topObj = container.NewVBox(warn, header)
+	}
+	z.win.SetContent(container.NewBorder(topObj, bar, nil, nil, container.NewVBox(body)))
 	z.win.Canvas().SetOnTypedKey(func(e *fyne.KeyEvent) {
 		switch e.Name {
 		case fyne.KeyEscape:
@@ -179,6 +188,23 @@ func (z *Wizard) runProvision() {
 		rec, err := p.Provision(creds, z.nodeName)
 		fyne.Do(func() {
 			if err != nil {
+				// Reactive insecure opt-in: only on a real verification failure, never a
+				// standing toggle (FR-009/010). Accept → rebuild the client insecure and retry;
+				// decline → no connection (FR-011). The !z.insecure guard avoids a retry loop.
+				if errors.Is(err, apiclient.ErrUntrustedCert) && !z.insecure {
+					dialog.ShowConfirm("Certificate not verified",
+						"The server's certificate could not be verified.\n\nContinue anyway (insecure)? "+
+							"This applies only to the current session and is not remembered.",
+						func(ok bool) {
+							if !ok {
+								z.stepServer()
+								return
+							}
+							z.insecure = true
+							z.runProvision()
+						}, z.win)
+					return
+				}
 				dialog.ShowError(errors.New(friendly(err)), z.win)
 				switch {
 				case errors.Is(err, apiclient.ErrNodeNameTaken):
@@ -208,8 +234,10 @@ func (z *Wizard) showHome(rec state.Record) {
 	if z.insecure {
 		opts = append(opts, apiclient.WithInsecure())
 	}
-	ctrl := panel.New(apiclient.New(rec.ServerURL, opts...), rec, z.keys)
-	z.win.SetContent(NewPanel(z.win, rec, tn, ctrl))
+	ctrl := panel.New(apiclient.New(rec.ServerURL, opts...), rec, z.keys, z.statePath, z.insecure)
+	z.win.SetContent(NewPanel(z.win, rec, tn, ctrl, func() {
+		NewWizard(z.win, z.statePath, z.keys, z.origInsecure).Start()
+	}))
 }
 
 // cancel discards any partial setup (vault key + state record) and returns to the start.

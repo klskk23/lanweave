@@ -121,7 +121,8 @@ func onboardUser(t *testing.T, url string, pool *x509.CertPool, invite, username
 		t.Fatalf("register device %s: %v", devName, err)
 	}
 	rec := state.Record{NodeName: devName, IP: node.IP, ServerURL: url, Network: "100.127.0.0/16"}
-	return panel.New(c, rec, keyring.NewFake()), c
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	return panel.New(c, rec, keyring.NewFake(), statePath, false), c
 }
 
 // TestPanelIntegrationViewCreateJoin covers US1 (view + this-machine) and US2 (create/join/
@@ -259,4 +260,94 @@ func TestPanelIntegrationOwnerOps(t *testing.T) {
 	if zones, _ := alice.Zones(); len(zones) != 0 {
 		t.Errorf("after delete, alice zones = %d, want 0", len(zones))
 	}
+}
+
+// TestPanelIntegrationLogout is the US1 end-to-end acceptance test against a real server
+// (real SQLite + nftables + WireGuard): a confirmed logout removes this device's own node,
+// its zone-set membership (observed via another member), and clears the local session token,
+// device key, and state file. remoteRemoved is true because the server is reachable.
+func TestPanelIntegrationLogout(t *testing.T) {
+	url, cert, mint := realServer(t)
+	pool := trustPool(cert)
+
+	// Onboard alice with a real device key + session token in the keyring and a real state
+	// file, so logout's local clears are observable.
+	c := apiclient.New(url, apiclient.WithRootCAs(pool))
+	if err := c.Register(mint(), "alice", "password123"); err != nil {
+		t.Fatalf("register alice: %v", err)
+	}
+	if err := c.Login("alice", "password123"); err != nil {
+		t.Fatalf("login alice: %v", err)
+	}
+	k, _ := wgtypes.GeneratePrivateKey()
+	node, err := c.RegisterNode("laptop", k.PublicKey().String())
+	if err != nil {
+		t.Fatalf("register laptop: %v", err)
+	}
+	keys := keyring.NewFake()
+	_ = keys.Set(keyring.DeviceKeyName, []byte(k.String()))
+	_ = keys.Set(keyring.SessionTokenName, []byte(c.Token()))
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	rec := state.Record{ServerURL: url, NodeName: "laptop", IP: node.IP, Network: "100.127.0.0/16"}
+	if err := state.Save(statePath, rec); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	ctrl := panel.New(c, rec, keys, statePath, false)
+
+	// Alice owns a zone (auto-joins laptop); bob joins so the zone — and thus the membership
+	// cascade after logout — is observable from a surviving member.
+	if err := ctrl.CreateZone("team", "zone-strong-pw"); err != nil {
+		t.Fatalf("create zone: %v", err)
+	}
+	bob, _ := onboardUser(t, url, pool, mint(), "bob", "bob-pc")
+	if err := bob.JoinZone("team", "zone-strong-pw"); err != nil {
+		t.Fatalf("bob join: %v", err)
+	}
+	if members, _ := bob.Members("team"); !hasMember(members, "laptop") {
+		t.Fatalf("precondition: bob should see alice's laptop before logout: %+v", members)
+	}
+
+	// Log out.
+	remoteRemoved, err := ctrl.Logout()
+	if err != nil {
+		t.Fatalf("logout local clears failed: %v", err)
+	}
+	if !remoteRemoved {
+		t.Error("remoteRemoved = false, want true (server reachable)")
+	}
+
+	// Server-side: alice's node is gone (the JWT still works for the read).
+	list, err := c.ListNodes()
+	if err != nil {
+		t.Fatalf("list nodes after logout: %v", err)
+	}
+	for _, n := range list.Nodes {
+		if n.Name == "laptop" {
+			t.Errorf("alice's node still present after logout: %+v", n)
+		}
+	}
+	// Cascade: bob no longer sees alice's laptop in the zone (peer + nft set element cleared).
+	if members, _ := bob.Members("team"); hasMember(members, "laptop") {
+		t.Errorf("alice's laptop still in zone members after logout: %+v", members)
+	}
+
+	// Local: device key, session token, and state file are all cleared.
+	if _, err := keys.Get(keyring.DeviceKeyName); !errors.Is(err, keyring.ErrNotFound) {
+		t.Errorf("device key not cleared: %v", err)
+	}
+	if _, err := keys.Get(keyring.SessionTokenName); !errors.Is(err, keyring.ErrNotFound) {
+		t.Errorf("session token not cleared: %v", err)
+	}
+	if state.Exists(statePath) {
+		t.Error("state file not cleared after logout")
+	}
+}
+
+func hasMember(members []panel.MemberView, nodeName string) bool {
+	for _, m := range members {
+		if m.NodeName == nodeName {
+			return true
+		}
+	}
+	return false
 }

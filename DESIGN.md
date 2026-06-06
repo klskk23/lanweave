@@ -272,7 +272,9 @@ table inet lanweave {
 2. **证书信任**：
    - 默认走系统 CA / LE 信任链。
    - 自签名场景：要求运维预装根 CA。
-   - "忽略证书验证"**仅作为 CLI flag**（如 `--insecure`），不在 UI 暴露 —— 防止用户无脑勾选。
+   - "忽略证书验证"默认不在 UI 暴露 —— 防止用户无脑勾选。保留 `--insecure` CLI flag（仅 troubleshooting）；
+     UI 中**仅在证书校验真实失败时**反应式弹窗，提供「继续（不安全）」选项：必须显式确认、**仅当前会话生效且永不持久化**、
+     接受后全程显示常驻「证书未验证」警示；不提供常驻勾选框 / 开关（feature 017）。
 3. **账号**：
    - 已有账号 → 登录（username/password）。
    - 新用户 → 输入邀请码 + 用户名 + 密码 → 注册。
@@ -357,9 +359,10 @@ password = "ChangeMeOnFirstLogin!"  # 明文，首次启动后建议改并重启
 | TOML 中 admin 明文密码                   | `chmod 600`、不入 git、首次后建议改        |
 | JWT 不可吊销                             | 1–2h 短期过期；重启换密钥可全吊销          |
 | 无账户级失败计数（仅全局限流）           | v1.1 补；上线后观察                        |
-| `--insecure` CLI flag 跳过证书验证       | 仅 CLI、不在 UI；文档警示                  |
+| 跳过证书验证（`--insecure` CLI flag + 证书失败时的反应式 UI opt-in） | CLI flag 仅 troubleshooting；UI 仅在校验失败时弹窗、显式确认、会话级不持久、常驻「未验证」警示；无常驻开关（017） |
 | 服务进程 root 运行                       | systemd 用 CapabilityBoundingSet 缩小      |
 | 发布产物未签名（Windows installer / .deb） | 发布说明提示 SmartScreen「更多信息→仍要运行」；附 `SHA256SUMS` 供完整性校验 |
+| 桌面 GUI（Fyne 弹窗 / 指示器）以人工 quickstart 矩阵验收，非自动化端到端测试 | 安全相关逻辑（登出序列、证书失败→重建 insecure）仍有 apiclient / controller 层自动化验收；仅纯 GUI 呈现走人工（宪法 II 的 GUI 豁免，017 登记） |
 
 ---
 

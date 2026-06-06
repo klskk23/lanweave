@@ -26,21 +26,27 @@ type Panel struct {
 	tn   *tunnel.Tunnel
 	ctrl *panel.Controller
 
-	status   *widget.Label
-	connBtn  *widget.Button
-	discBtn  *widget.Button
-	nodesBox *fyne.Container
-	zonesBox *fyne.Container
+	// restart returns to the first setup step (server-URL entry) after a logout.
+	restart func()
+
+	status      *widget.Label
+	connBtn     *widget.Button
+	discBtn     *widget.Button
+	insecureLbl *widget.Label
+	nodesBox    *fyne.Container
+	zonesBox    *fyne.Container
 }
 
 // NewPanel builds the panel. It validates the session (prompting a sign-in when needed),
-// then loads the data and starts a periodic refresh.
-func NewPanel(win fyne.Window, rec state.Record, tn *tunnel.Tunnel, ctrl *panel.Controller) fyne.CanvasObject {
+// then loads the data and starts a periodic refresh. restart navigates back to the wizard's
+// server-URL step after a logout.
+func NewPanel(win fyne.Window, rec state.Record, tn *tunnel.Tunnel, ctrl *panel.Controller, restart func()) fyne.CanvasObject {
 	p := &Panel{
-		win: win, rec: rec, tn: tn, ctrl: ctrl,
-		status:   widget.NewLabel("Status: disconnected"),
-		nodesBox: container.NewVBox(),
-		zonesBox: container.NewVBox(),
+		win: win, rec: rec, tn: tn, ctrl: ctrl, restart: restart,
+		status:      widget.NewLabel("Status: disconnected"),
+		insecureLbl: widget.NewLabelWithStyle("⚠ certificate not verified", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		nodesBox:    container.NewVBox(),
+		zonesBox:    container.NewVBox(),
 	}
 	content := p.build()
 	go p.start()
@@ -67,13 +73,87 @@ func (p *Panel) build() fyne.CanvasObject {
 		container.NewTabItem("My nodes", container.NewVScroll(p.nodesBox)),
 		container.NewTabItem("My zones", container.NewVScroll(zonesTab)),
 	)
-	return container.NewBorder(top, nil, nil, nil, tabs)
+
+	// Log out sits in a footer, deliberately away from the Connect/zone primary controls so
+	// it isn't triggered by accident (FR-001). The footer also hosts the persistent
+	// "certificate not verified" indicator (FR-013).
+	logoutBtn := widget.NewButton("Log out", p.confirmLogout)
+	logoutBtn.Importance = widget.LowImportance
+	bottom := container.NewVBox(
+		widget.NewSeparator(),
+		container.NewBorder(nil, nil, p.insecureLbl, logoutBtn),
+	)
+	p.refreshInsecure()
+	return container.NewBorder(top, bottom, nil, nil, tabs)
+}
+
+// refreshInsecure shows the persistent "certificate not verified" indicator whenever the
+// session is bypassing TLS verification (the --insecure CLI flag or an accepted opt-in).
+func (p *Panel) refreshInsecure() {
+	if p.ctrl.Insecure() {
+		p.insecureLbl.Show()
+	} else {
+		p.insecureLbl.Hide()
+	}
+}
+
+// confirmLogout names this device + server and the consequences (disconnect, remove this
+// device's node, re-enter the server address), then on confirmation tears down the tunnel,
+// runs the logout, warns if the remote node may linger, and returns to the setup wizard.
+func (p *Panel) confirmLogout() {
+	msg := fmt.Sprintf("Log out “%s” from %s?\n\nThis disconnects, removes this device's "+
+		"registration on that server, and returns you to the server-address step where you can "+
+		"sign in again.", p.rec.NodeName, p.rec.ServerURL)
+	dialog.ShowConfirm("Log out", msg, func(ok bool) {
+		if !ok {
+			return
+		}
+		prog := dialog.NewCustomWithoutButtons("Logging out…", widget.NewProgressBarInfinite(), p.win)
+		prog.Show()
+		go func() {
+			_ = p.tn.Disconnect()
+			remoteRemoved, lerr := p.ctrl.Logout()
+			fyne.Do(func() {
+				prog.Hide()
+				if lerr != nil {
+					dialog.ShowInformation("Logged out", "You've been logged out, but clearing some local "+
+						"data failed. You can finish setup again from the start.", p.win)
+				} else if !remoteRemoved {
+					dialog.ShowInformation("Logged out", "You've been logged out on this device. The server "+
+						"couldn't be reached, so this device's registration may still exist there until it's "+
+						"cleaned up.", p.win)
+				}
+				p.restart()
+			})
+		}()
+	}, p.win)
+}
+
+// offerInsecure shows the reactive certificate opt-in (FR-009/010). On accept it rebuilds the
+// controller's API client with verification disabled (re-applying the cached session), shows
+// the persistent indicator, and runs onAccept (typically a retry of the failed operation).
+func (p *Panel) offerInsecure(onAccept func()) {
+	dialog.ShowConfirm("Certificate not verified",
+		"The server's certificate could not be verified.\n\nContinue anyway (insecure)? This applies "+
+			"only to the current session and is not remembered.",
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			p.ctrl.UseInsecureClient(apiclient.New(p.rec.ServerURL, apiclient.WithInsecure()))
+			p.refreshInsecure()
+			onAccept()
+		}, p.win)
 }
 
 // start validates the session (prompting sign-in if needed), then refreshes and polls.
 func (p *Panel) start() {
 	need, err := p.ctrl.LoadSession()
 	if err != nil {
+		if errors.Is(err, apiclient.ErrUntrustedCert) {
+			fyne.Do(func() { p.offerInsecure(func() { go p.start() }) })
+			return
+		}
 		fyne.Do(func() { dialog.ShowError(errors.New(panelMessage(err)), p.win) })
 	}
 	if need {
@@ -258,6 +338,10 @@ func (p *Panel) run(msg string, op func() error) {
 		fyne.Do(func() {
 			prog.Hide()
 			if err != nil {
+				if errors.Is(err, apiclient.ErrUntrustedCert) {
+					p.offerInsecure(func() { p.run(msg, op) })
+					return
+				}
 				dialog.ShowError(errors.New(panelMessage(err)), p.win)
 				return
 			}

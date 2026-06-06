@@ -204,3 +204,50 @@ func TestTLSVerification(t *testing.T) {
 		t.Errorf("insecure login should succeed, got %v", err)
 	}
 }
+
+// TestInsecureGetter covers the getter that drives the persistent "certificate not verified"
+// indicator (FR-013/014).
+func TestInsecureGetter(t *testing.T) {
+	if apiclient.New("https://x.example").Insecure() {
+		t.Error("default client should report Insecure()=false")
+	}
+	if !apiclient.New("https://x.example", apiclient.WithInsecure()).Insecure() {
+		t.Error("WithInsecure client should report Insecure()=true")
+	}
+}
+
+// TestDeleteNode covers logout's server call: a 204 returns nil and the wire request is a
+// DELETE to /api/v1/nodes/{id} with the bearer token; a non-2xx maps to a non-nil error.
+func TestDeleteNode(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /api/v1/nodes/{id}", func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := apiclient.New(srv.URL)
+	c.SetToken("tok-xyz")
+	if err := c.DeleteNode(42); err != nil {
+		t.Fatalf("delete node 204: %v", err)
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/api/v1/nodes/42" {
+		t.Errorf("request = %s %s, want DELETE /api/v1/nodes/42", gotMethod, gotPath)
+	}
+	if gotAuth != "Bearer tok-xyz" {
+		t.Errorf("auth header = %q, want Bearer tok-xyz", gotAuth)
+	}
+
+	// A 5xx → a non-nil error.
+	mux2 := http.NewServeMux()
+	mux2.HandleFunc("DELETE /api/v1/nodes/{id}", func(w http.ResponseWriter, _ *http.Request) {
+		protocol.WriteJSONError(w, http.StatusInternalServerError, "server_error", "boom")
+	})
+	srv2 := httptest.NewServer(mux2)
+	t.Cleanup(srv2.Close)
+	if err := apiclient.New(srv2.URL).DeleteNode(7); err == nil {
+		t.Error("delete node on 500 should return an error")
+	}
+}

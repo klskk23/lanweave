@@ -58,8 +58,10 @@ func main() {
 		if *insecure {
 			opts = append(opts, apiclient.WithInsecure())
 		}
-		ctrl := panel.New(apiclient.New(rec.ServerURL, opts...), *rec, keys)
-		w.SetContent(ui.NewPanel(w, *rec, tn, ctrl))
+		ctrl := panel.New(apiclient.New(rec.ServerURL, opts...), *rec, keys, statePath, *insecure)
+		w.SetContent(ui.NewPanel(w, *rec, tn, ctrl, func() {
+			ui.NewWizard(w, statePath, keys, *insecure).Start()
+		}))
 	default:
 		ui.NewWizard(w, statePath, keys, *insecure).Start()
 	}
