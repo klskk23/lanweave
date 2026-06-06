@@ -88,18 +88,19 @@ jobs:
       - name: Derive version from tag
         shell: bash
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-      - name: Install build deps (mingw for cgo, NSIS for the installer, librsvg/icoutils for icons)
+      - name: Install build deps (mingw for cgo, NSIS for the installer, librsvg + ImageMagick for icons)
         shell: pwsh
         run: |
           choco install mingw -y --no-progress
           choco install nsis -y --no-progress
-          # Rasterization toolchain for `make icons`: rsvg-convert (librsvg) + icotool (icoutils)
-          # via the runner's bundled MSYS2. windres comes from the mingw install above.
-          # If MSYS2 ever lacks icoutils, fall back to `choco install imagemagick` for ICO assembly.
-          C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-librsvg icoutils"
-          # Put the MSYS2 tool dirs on PATH for the later bash steps (rsvg-convert, icotool, windres).
+          # Icon toolchain for `make icons`: rsvg-convert (librsvg, via the runner's MSYS2) renders
+          # the SVG; ImageMagick assembles the multi-size ICO (MSYS2 has no icoutils package, so the
+          # script's icotool path is unavailable here and it falls back to magick). windres comes
+          # from the mingw install above.
+          choco install imagemagick -y --no-progress
+          C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-librsvg"
+          # Put the MSYS2 mingw64 bin (rsvg-convert, windres) on PATH for the later bash steps.
           "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "C:\msys64\usr\bin"     | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Download and verify Wintun
         shell: pwsh
         run: |
