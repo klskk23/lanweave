@@ -1,6 +1,6 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复。
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -22,8 +22,9 @@
 | 009 | windows-client-skeleton-and-wizard ✅   | 客户端     | 002, 004   | 首次启动 wizard 走完，本机 node 落地 |
 | 010 | windows-client-tunnel ✅                | 客户端     | 009, 003   | 客户端拉起 WG，能 ping 服务器         |
 | 011 | windows-client-main-panel ✅            | 客户端     | 005, 010   | UI 完成所有 node/zone 管理操作        |
-| 012 | deployment-packaging                    | 运维       | 008, 011   | .deb 一键装、Windows installer 一键装|
-| 013 | windows-client-elevation                | 客户端     | 010, 012   | 双击快捷方式启动即弹 UAC，建网卡成功  |
+| 012 | deployment-packaging ✅                 | 运维       | 008, 011   | .deb 一键装、Windows installer 一键装|
+| 013 | windows-client-elevation ✅            | 客户端     | 010, 012   | 双击快捷方式启动即弹 UAC，建网卡成功  |
+| 014 | ci-cd-build-and-release ✅              | 运维       | 012, 013   | 打 v* tag → 测试门禁 → 出 .deb+安装器 → 自动建 draft Release |
 
 ---
 
@@ -240,6 +241,35 @@
 **不做**
 - 非 Windows 平台（无此问题）。
 - 建网卡固有的管理员需求本身（无法降权规避）。
+
+---
+
+### 014 — ci-cd-build-and-release
+**背景**
+- 仓库已有 GitHub 远端（`klskk23/lanweave`，public）。手工编译服务端 `.deb` 与 Windows 客户端、再手动发布，既慢又易漏步骤、版本易对不上。把编译/测试/打包/发布做成 GitHub Actions，产物自动挂到 Release。
+
+**范围**
+- **触发与版本**：`release.yml` 仅 `v*` tag 触发；版本 = tag 去前导 `v`（`vX.Y.Z`→`X.Y.Z`），作为唯一来源喂给 nfpm `VERSION`、Windows `-ldflags -X main.version`、各产物文件名；tag 含 pre-release 后缀（如 `-rc1`）→ Release 标 `prerelease`。
+- **测试门禁（Linux job，先过才构建）**：lint（gofmt / go vet / staticcheck）+ `unshare -rUn go test ./...`（真 SQLite/nftables/WireGuard，禁 mock，符合 Principle II）+ 打包测试（nfpm / dpkg-deb / fakeroot）。
+- **构建 .deb（ubuntu job）**：`make deb` → 上传 artifact。
+- **构建 Windows 客户端（`windows-latest` 原生 job）**：`setup-go` + cgo gcc（mingw）+ `choco install nsis`；下载 `wintun-0.14.1.zip` 并校验 SHA256 → 取 `bin/amd64/wintun.dll`；`go build -tags gui` → `makensis`（OutFile 带版本）→ 另打便携 zip → 上传 artifacts。
+- **发布（ubuntu job，`permissions: contents: write`，用自动 `GITHUB_TOKEN`，无需 PAT）**：汇总所有 artifact → 生成 `SHA256SUMS` → 建 **draft** Release（自动 release notes，按 tag 判 prerelease）。
+- **资产**：`lanweave_<ver>_amd64.deb`、`lanweave-client-<ver>-setup.exe`、便携 zip（`lanweave-client.exe`+`wintun.dll`）、`SHA256SUMS`。
+- **普通 CI（`ci.yml`）**：push / PR 触发跑 lint + `unshare -rUn go test ./...`，保持 main 常绿。
+
+**验收**
+- push 一个 `v0.1.0` tag → Actions 跑完测试门禁 → 在 Release 看到 draft，挂着 `.deb` + 安装器 + 便携 zip + `SHA256SUMS`，文件名均带 `0.1.0`。
+- 测试失败时不产出 Release（门禁有效）。
+- `ci.yml` 在 PR 上跑测试并能拦红。
+
+**不做 / 暂缓**
+- 代码签名（Windows Authenticode、`.deb` GPG）——v1 不签，发布说明写明 SmartScreen 提示。
+- arm64（deb / Windows 均仅 amd64）。
+- Windows GUI/UAC/建网卡的自动化测试（已登记手动例外，CI 只 build 不测）。
+
+**发布前 TODO（不阻塞搭流水线）**
+- 确认 Wintun 预编译二进制再分发许可（WireGuard LLC）允许打进 installer。
+- 把 `wintun-0.14.1` 官方 SHA256 填入 workflow。
 
 ---
 
