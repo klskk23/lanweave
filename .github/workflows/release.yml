@@ -1,0 +1,164 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Least privilege by default; only the release job is granted write to create the Release.
+permissions:
+  contents: read
+
+env:
+  # Pinned tool/driver versions (confirm/bump as needed).
+  NFPM_VERSION: "v2.41.0"
+  WINTUN_VERSION: "0.14.1"
+  # Official SHA256 of wintun-0.14.1.zip. MUST be set to the real value before the first
+  # release; the build fails loudly if it does not match (it will not ship an unverified DLL).
+  WINTUN_SHA256: "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
+
+jobs:
+  # ---- Gate: real test suite must pass before anything is built ----------------------------
+  test:
+    name: Test gate
+    runs-on: ubuntu-22.04   # 22.04 allows unprivileged user namespaces (24.04 restricts them)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify rootless netns works (fail-closed gate)
+        run: |
+          unshare -rUn -- sh -c 'ip link set lo up && ip link' \
+            || { echo "::error::unprivileged user+net namespace unavailable on this runner"; exit 1; }
+      - name: Install lint/test deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fakeroot
+          go install "github.com/goreleaser/nfpm/v2/cmd/nfpm@${NFPM_VERSION}"
+          go install honnef.co/go/tools/cmd/staticcheck@latest   # TODO: pin a dated release
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Lint
+        run: |
+          test -z "$(gofmt -l .)" || { echo "gofmt needs:"; gofmt -l .; exit 1; }
+          go vet ./...
+          staticcheck ./...
+      - name: Pre-download modules (network is unavailable inside the netns)
+        run: go mod download
+      - name: Test (real deps, rootless netns)
+        run: unshare -rUn go test ./...
+
+  # ---- Build the server .deb ---------------------------------------------------------------
+  build-deb:
+    name: Build .deb
+    needs: test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Derive version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Install nfpm
+        run: |
+          go install "github.com/goreleaser/nfpm/v2/cmd/nfpm@${NFPM_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build package
+        run: make VERSION="$VERSION" deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  # ---- Build the Windows client + installer ------------------------------------------------
+  build-windows:
+    name: Build Windows client
+    needs: test
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Derive version from tag
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Install build deps (mingw for cgo, NSIS for the installer)
+        run: |
+          choco install mingw -y --no-progress
+          choco install nsis -y --no-progress
+      - name: Download and verify Wintun
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile wintun.zip
+          $hash = (Get-FileHash wintun.zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:WINTUN_SHA256.ToLower()) {
+            Write-Error "wintun.dll checksum mismatch: got $hash, expected $env:WINTUN_SHA256"
+            exit 1
+          }
+          Expand-Archive wintun.zip -DestinationPath wintun-extracted -Force
+          Copy-Item wintun-extracted/wintun/bin/amd64/wintun.dll .
+      - name: Build client (cgo + Fyne)
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go build -tags gui -ldflags "-H windowsgui -X main.version=${VERSION}" -o lanweave-client.exe ./cmd/lanweave-client
+      - name: Package installer (NSIS)
+        shell: bash
+        run: |
+          cp lanweave-client.exe wintun.dll packaging/windows/
+          ( cd packaging/windows && "/c/Program Files (x86)/NSIS/makensis.exe" lanweave-client.nsi )
+          mv "packaging/windows/lanweave-client-setup.exe" "lanweave-client-${VERSION}-setup.exe"
+      - name: Portable archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory portable | Out-Null
+          Copy-Item lanweave-client.exe, wintun.dll portable/
+          Compress-Archive -Path portable/* -DestinationPath "lanweave-client-$env:VERSION-windows-amd64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            lanweave-client-*-setup.exe
+            lanweave-client-*-windows-amd64.zip
+          if-no-files-found: error
+
+  # ---- Assemble the draft Release (only if both builds succeeded) --------------------------
+  release:
+    name: Draft release
+    needs: [build-deb, build-windows]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect assets and write SHA256SUMS
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.deb' -o -name '*-setup.exe' -o -name '*-windows-amd64.zip' \) \
+            -exec cp {} release/ \;
+          ( cd release && sha256sum * > SHA256SUMS )
+          ls -l release
+      - name: Create draft Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: release/*
+          body: |
+            > **Note — unsigned artifacts.** These downloads are **not code-signed**. On Windows you
+            > may see a SmartScreen "unknown publisher" warning; choose **More info → Run anyway**.
+            > Verify integrity against `SHA256SUMS`:
+            > `sha256sum -c SHA256SUMS` (Linux) or `Get-FileHash <file>` (Windows).
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

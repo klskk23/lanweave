@@ -36,6 +36,11 @@ connecting a client).
 
 ## 1. Building
 
+> **Official releases are built automatically.** Pushing a `vX.Y.Z` tag runs GitHub Actions,
+> which tests, builds the `.deb` + Windows installer, and drafts a GitHub Release with all
+> artifacts and a `SHA256SUMS` file (reviewed, then published manually). The steps below are for
+> local/manual builds.
+
 ### 1.1 Server
 
 Requires Go 1.26. Build the static server binary, or build the Debian package (which also builds
@@ -188,26 +193,27 @@ Cloud security groups (AWS/GCP/etc.) must allow the same.
 
 ### 3.3 Getting an invite code
 
-Invite codes are minted by an **admin** via the API; the client uses one to register. There is no
-GUI for minting invites in v1.
+Invite codes are minted by an **admin** via the API; the client uses one to register.
 
-```sh
-# 1) admin password (generated on first install)
-sudo cat /etc/lanweave/initial-admin-password
+1. Use the helper script `/usr/local/bin/lanweave-invite-codegen.sh` (installed by the `.deb`; it
+   logs in as the configured admin and prints a fresh code).
+2. Or mint one manually:
 
-# 2) log in → JWT (self-signed cert → -k for local bootstrap)
-TOKEN=$(curl -sk https://localhost:8443/api/v1/login \
-  -d '{"username":"admin","password":"<password>"}' | jq -r .token)
+   ```sh
+   # 1) admin password (generated on first install)
+   sudo cat /etc/lanweave/initial-admin-password
 
-# 3) mint a one-time invite code
-curl -sk -X POST https://localhost:8443/api/v1/admin/invites \
-  -H "Authorization: Bearer $TOKEN" | jq -r .code
-```
+   # 2) log in → JWT (self-signed cert → -k for local bootstrap)
+   TOKEN=$(curl -sk https://localhost:8443/api/v1/login \
+     -d '{"username":"admin","password":"<password>"}' | jq -r .token)
 
-- `-k` skips TLS verification — only for local admin bootstrap. From another host use
-  `--cacert /etc/lanweave/cert.pem` and the cert's hostname.
-- Invite codes are **one-time**. List status with `GET /api/v1/admin/invites`.
-- After changing the admin password, `sudo rm -f /etc/lanweave/initial-admin-password`.
+   # 3) mint a one-time invite code
+   curl -sk -X POST https://localhost:8443/api/v1/admin/invites \
+     -H "Authorization: Bearer $TOKEN" | jq -r .code
+   # -k skips TLS verification (local admin bootstrap only); from another host use
+   # --cacert /etc/lanweave/cert.pem and the cert's hostname.
+   ```
+3. Invite codes are **one-time**; list status with `GET /api/v1/admin/invites`.
 
 ### 3.4 Windows client first run
 

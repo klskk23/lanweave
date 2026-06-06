@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: ['**']   # all branches, but NOT tags (release.yml handles v* tags)
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  NFPM_VERSION: "v2.41.0"   # so the host-gated packaging test runs
+
+jobs:
+  test:
+    name: Lint & test
+    runs-on: ubuntu-22.04   # 22.04 allows unprivileged user namespaces (24.04 restricts them)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify rootless netns works (fail-closed gate)
+        run: |
+          unshare -rUn -- sh -c 'ip link set lo up && ip link' \
+            || { echo "::error::unprivileged user+net namespace unavailable on this runner"; exit 1; }
+      - name: Install lint/test deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fakeroot
+          go install "github.com/goreleaser/nfpm/v2/cmd/nfpm@${NFPM_VERSION}"
+          go install honnef.co/go/tools/cmd/staticcheck@latest   # TODO: pin a dated release
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Lint
+        run: |
+          test -z "$(gofmt -l .)" || { echo "gofmt needs:"; gofmt -l .; exit 1; }
+          go vet ./...
+          staticcheck ./...
+      - name: Pre-download modules (network is unavailable inside the netns)
+        run: go mod download
+      - name: Test (real deps, rootless netns)
+        run: unshare -rUn go test ./...

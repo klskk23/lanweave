@@ -33,6 +33,10 @@
 
 ## 1. 编译
 
+> **正式发布是自动构建的。** push 一个 `vX.Y.Z` tag 会触发 GitHub Actions:跑测试、构建 `.deb` +
+> Windows 安装器,并生成一个含全部产物与 `SHA256SUMS` 的 GitHub Release 草稿(人工审阅后手动发布)。
+> 下面是本地/手动构建的步骤。
+
 ### 1.1 服务端
 
 需要 Go 1.26。可只编静态服务端二进制,或直接打 `.deb`(会顺带编二进制)。`make deb` 需要
@@ -173,24 +177,25 @@ journalctl -u lanweaved -f      # 跟踪日志
 
 ### 3.3 获取邀请码
 
-邀请码由**管理员**通过 API 签发,客户端用它注册。v1 没有签发邀请码的 GUI。
+邀请码由**管理员**通过 API 签发,客户端用它注册。
+1. 使用脚本 `/usr/local/bin/lanweave-invite-codegen.sh`
+2. 手动签发
 
-```sh
-# 1) 取 admin 密码(首次安装时生成)
-sudo cat /etc/lanweave/initial-admin-password
+  ```sh
+  # 1) 取 admin 密码(首次安装时生成)
+  sudo cat /etc/lanweave/initial-admin-password
 
-# 2) 登录换 JWT(自签证书 → 本机引导用 -k)
-TOKEN=$(curl -sk https://localhost:8443/api/v1/login \
-  -d '{"username":"admin","password":"<密码>"}' | jq -r .token)
+  # 2) 登录换 JWT(自签证书 → 本机引导用 -k)
+  TOKEN=$(curl -sk https://localhost:8443/api/v1/login \
+    -d '{"username":"admin","password":"<密码>"}' | jq -r .token)
 
-# 3) 签发一次性邀请码
-curl -sk -X POST https://localhost:8443/api/v1/admin/invites \
-  -H "Authorization: Bearer $TOKEN" | jq -r .code
-```
+  # 3) 签发一次性邀请码
+  curl -sk -X POST https://localhost:8443/api/v1/admin/invites \
+    -H "Authorization: Bearer $TOKEN" | jq -r .code
+  # `-k` 跳过 TLS 校验,仅限本机引导;外部调用改用 `--cacert /etc/lanweave/cert.pem` 并用证书主机名访问。
+  ```
+3. 邀请码**一次性**;`GET /api/v1/admin/invites` 查状态。
 
-- `-k` 跳过 TLS 校验,仅限本机引导;外部调用改用 `--cacert /etc/lanweave/cert.pem` 并用证书主机名访问。
-- 邀请码**一次性**;`GET /api/v1/admin/invites` 查状态。
-- 改完 admin 密码后:`sudo rm -f /etc/lanweave/initial-admin-password`。
 
 ### 3.4 客户端首次运行
 

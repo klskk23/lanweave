@@ -359,6 +359,7 @@ password = "ChangeMeOnFirstLogin!"  # 明文，首次启动后建议改并重启
 | 无账户级失败计数（仅全局限流）           | v1.1 补；上线后观察                        |
 | `--insecure` CLI flag 跳过证书验证       | 仅 CLI、不在 UI；文档警示                  |
 | 服务进程 root 运行                       | systemd 用 CapabilityBoundingSet 缩小      |
+| 发布产物未签名（Windows installer / .deb） | 发布说明提示 SmartScreen「更多信息→仍要运行」；附 `SHA256SUMS` 供完整性校验 |
 
 ---
 
