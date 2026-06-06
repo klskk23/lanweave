@@ -15,7 +15,7 @@ deb: build
 #   go build -tags gui -ldflags "$(LDFLAGS)" -o lanweave-client.exe ./cmd/lanweave-client
 # then packaged with NSIS (packaging/windows/lanweave-client.nsi) alongside wintun.dll.
 client:
-	@echo "Build the Windows client with -tags gui on Windows; see packaging/windows/ and INSTALL.md."
+	@echo "Build the Windows client with -tags gui on Windows; see packaging/windows/ and docs/GUIDE.en.md."
 
 test:
 	go test ./...

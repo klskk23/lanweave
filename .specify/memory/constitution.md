@@ -209,7 +209,7 @@ These gates are enforced at PR review time.
   contradict it. If the feature requires a contradiction, `DESIGN.md` is
   updated in the same PR.
 - **ROADMAP.md tracking**: When a feature is completed, its entry in
-  `ROADMAP.md` is checked off in the merge commit. This is the canonical
+  `docs/ROADMAP.md` is checked off in the merge commit. This is the canonical
   way to read "what's done."
 - **PR checklist** (minimum): tests added/updated and green; lint clean;
   no `[NEEDS CLARIFICATION]` left in spec; CHANGELOG entry if user-visible.
@@ -224,7 +224,7 @@ These gates are enforced at PR review time.
 ## Governance
 
 This constitution supersedes every ad-hoc decision and informal
-convention. `DESIGN.md`, `ROADMAP.md`, and per-feature `spec.md` /
+convention. `DESIGN.md`, `docs/ROADMAP.md`, and per-feature `spec.md` /
 `plan.md` files all inherit from it.
 
 **Amendments**: Any change to this file MUST update the Sync Impact

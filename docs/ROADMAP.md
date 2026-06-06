@@ -1,7 +1,7 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切。
-> 设计文档：`DESIGN.md`
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复。
+> 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
 
@@ -23,6 +23,7 @@
 | 010 | windows-client-tunnel ✅                | 客户端     | 009, 003   | 客户端拉起 WG，能 ping 服务器         |
 | 011 | windows-client-main-panel ✅            | 客户端     | 005, 010   | UI 完成所有 node/zone 管理操作        |
 | 012 | deployment-packaging                    | 运维       | 008, 011   | .deb 一键装、Windows installer 一键装|
+| 013 | windows-client-elevation                | 客户端     | 010, 012   | 双击快捷方式启动即弹 UAC，建网卡成功  |
 
 ---
 
@@ -210,12 +211,35 @@
 - 服务端 `.deb` 包：`nfpm` 或 `dpkg-deb`，含 `/usr/bin/lanweaved`、`/etc/lanweave/config.toml.example`、`/lib/systemd/system/lanweaved.service`
 - systemd unit：`User=root`、`CapabilityBoundingSet=CAP_NET_ADMIN`、`Restart=on-failure`、`StandardOutput=journal`
 - Windows 客户端：NSIS 或 WiX 打包为 `.msi`/`.exe` installer，含 WinTun 驱动
-- 安装后约定路径：`/etc/lanweave/config.toml`、`/var/lib/lanweave/db.sqlite`、`/var/lib/lanweave/wg_private`、Windows 侧 `%LOCALAPPDATA%\lanweave\`
+- 安装后约定路径：`/etc/lanweave/config.toml`、`/var/lib/lanweave/db.sqlite`、`/var/lib/lanweave/wg_private`、Windows 侧 `C:\Program Files\lanweave\`
 
 **验收**
 - 干净 Debian 12 上 `dpkg -i lanweave_*.deb` → `systemctl status lanweaved` 显示 active
 - 干净 Windows 10/11 上跑 installer → 桌面图标，启动客户端走 wizard 成功
 - 卸载干净，残留可控（运维数据/keyring 保留 vs 删除有明确策略）
+
+---
+
+### 013 — windows-client-elevation
+**背景**
+- 部署联调时发现：登录成功后建隧道报 “could not set up the network adapter”（`tunnel.ErrAdapter`），根因是客户端 exe 从快捷方式启动时是**普通权限**，而创建 WinTun 网卡需要管理员。手动“以管理员身份运行”可绕过。
+- 012 在 `cmd/lanweave-client/main.go` 的注释声称安装器附带 `requireAdministrator` manifest 自动提权，但仓库实际**未嵌入任何 manifest**，承诺与实现不符。
+
+**范围**
+- 让客户端 exe 启动即以管理员权限运行，二选一实现：
+  - 嵌入 `requireAdministrator` manifest（`.manifest` + 资源工具生成 `.syso`，`go build` 自动链接）；或
+  - 启动时自检权限，未提权则以 `runas` 重新拉起自身（触发 UAC）后退出。
+- 修正 `main.go` 关于 manifest 的失实注释；同步更新 `docs/GUIDE.zh.md` 与 NSIS 构建说明里的提权描述。
+- 拒绝 UAC 时行为明确，不静默失败误导用户。
+
+**验收**
+- 普通用户从开始菜单/桌面快捷方式**双击**启动 → 自动弹 UAC → 同意后程序以管理员运行；连接隧道，`ipconfig` 出现 100.127.x.y 网卡，能 ping 服务器。
+- 无需手动“以管理员身份运行”。
+- 用户拒绝 UAC 时有可理解的结果（不报错成功、不假装已连）。
+
+**不做**
+- 非 Windows 平台（无此问题）。
+- 建网卡固有的管理员需求本身（无法降权规避）。
 
 ---
 

@@ -18,19 +18,23 @@ import (
 	"lanweave/internal/client/state"
 	"lanweave/internal/client/tunnel"
 	"lanweave/internal/client/ui"
+	"lanweave/internal/client/winelevate"
 )
 
 var version = "dev"
 
 func main() {
+	// On Windows the client must run as administrator to create the WinTun adapter. When
+	// launched unelevated it relaunches itself through the UAC prompt and exits; on other
+	// platforms this is a no-op. Done before flag parsing so the original arguments are passed
+	// through to the elevated instance.
+	winelevate.EnsureElevated()
+
 	// --insecure skips TLS certificate verification. It is intentionally available only on
 	// the command line (for troubleshooting) and never surfaced in the UI.
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification (advanced; not shown in the UI)")
 	flag.Parse()
 
-	// On Windows, creating the WinTun adapter requires administrator rights; the installer
-	// ships a `requireAdministrator` manifest so the app runs elevated (feature 012). If the
-	// app is not elevated, adapter creation fails and the home view surfaces ErrAdapter.
 	a := app.NewWithID("com.lanweave.client")
 	w := a.NewWindow("lanweave " + version)
 	w.Resize(fyne.NewSize(440, 380))

@@ -5,12 +5,14 @@
 ;   2) copy wintun.dll (amd64) next to lanweave-client.exe
 ;   3) makensis lanweave-client.nsi   ->  lanweave-client-setup.exe
 ;
-; The installer requests administrator rights (installing the WinTun driver and writing to
-; Program Files needs elevation). It installs the app + driver to C:\Program Files\lanweave\,
+; The installer requests administrator rights only to install the WinTun driver and write to
+; Program Files. The installed app obtains its own administrator rights at runtime: it
+; self-elevates (UAC) on launch to create the network adapter (see internal/client/winelevate),
+; so no manifest is embedded here. It installs the app + driver to C:\Program Files\lanweave\,
 ; creates Start-menu and desktop shortcuts, and registers an uninstaller. Uninstall removes
 ; the program files but LEAVES the user's stored secrets and local state (the device key in
 ; the Windows Credential Manager and %LOCALAPPDATA%\lanweave\), so the device identity is not
-; destroyed by accident — see INSTALL.md for the manual purge.
+; destroyed by accident -- see docs/GUIDE.en.md for the manual purge.
 
 !define APPNAME "lanweave"
 !define EXE "lanweave-client.exe"
@@ -46,7 +48,7 @@ SectionEnd
 
 Section "Uninstall"
     ; Remove the program files and shortcuts. Deliberately keep the user's secrets/state
-    ; (Credential Manager entry + %LOCALAPPDATA%\lanweave\) — see INSTALL.md for purge steps.
+    ; (Credential Manager entry + %LOCALAPPDATA%\lanweave\) -- see docs/GUIDE.en.md for purge steps.
     Delete "$INSTDIR\${EXE}"
     Delete "$INSTDIR\wintun.dll"
     Delete "$INSTDIR\uninstall.exe"
