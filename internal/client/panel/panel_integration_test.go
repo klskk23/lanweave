@@ -189,12 +189,13 @@ func TestPanelIntegrationViewCreateJoin(t *testing.T) {
 		t.Errorf("dup name: got %v, want ErrZoneNameTaken", err)
 	}
 
-	// US2: Bob leaves → no longer a member.
+	// US2: Bob leaves → only alice's own device remains (it was auto-joined at create time,
+	// feature 015), confirming bob is gone but the creator stays a member.
 	if err := bob.LeaveZone("team"); err != nil {
 		t.Fatalf("bob leave: %v", err)
 	}
-	if members, _ := alice.Members("team"); len(members) != 0 {
-		t.Errorf("after bob leaves, members = %d, want 0", len(members))
+	if members, _ := alice.Members("team"); len(members) != 1 || members[0].NodeName != "laptop" {
+		t.Errorf("after bob leaves, want only alice's laptop, got %+v", members)
 	}
 }
 

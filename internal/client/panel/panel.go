@@ -23,7 +23,7 @@ type api interface {
 	ListNodes() (protocol.NodeListResponse, error)
 	ListZones() (protocol.ZoneListResponse, error)
 	ZoneMembers(name string) (protocol.ZoneMembersResponse, error)
-	CreateZone(name, password string) (protocol.ZoneResponse, error)
+	CreateZone(name string, nodeID int64, password string) (protocol.ZoneResponse, error)
 	JoinZone(name string, nodeID int64, password string) error
 	LeaveZone(name string, nodeID int64) error
 	ChangeZonePassword(name, password string) error
@@ -136,9 +136,14 @@ func (c *Controller) Members(zoneName string) ([]MemberView, error) {
 	return out, nil
 }
 
-// CreateZone creates a zone owned by the caller.
+// CreateZone creates a zone owned by the caller and auto-joins this machine's device, so
+// the creator is a member immediately without a separate join step.
 func (c *Controller) CreateZone(name, password string) error {
-	_, err := c.api.CreateZone(name, password)
+	id, err := c.thisMachineNodeID()
+	if err != nil {
+		return err
+	}
+	_, err = c.api.CreateZone(name, id, password)
 	return err
 }
 

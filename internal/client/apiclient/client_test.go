@@ -135,7 +135,7 @@ func TestZoneErrorMapping(t *testing.T) {
 	if _, err := c.Me(); !errors.Is(err, apiclient.ErrSessionExpired) {
 		t.Errorf("me 401: got %v, want ErrSessionExpired", err)
 	}
-	if _, err := c.CreateZone("dup", "pw"); !errors.Is(err, apiclient.ErrZoneNameTaken) {
+	if _, err := c.CreateZone("dup", 0, "pw"); !errors.Is(err, apiclient.ErrZoneNameTaken) {
 		t.Errorf("create dup: got %v, want ErrZoneNameTaken", err)
 	}
 	if err := c.JoinZone("z", 1, "bad"); !errors.Is(err, apiclient.ErrZoneOrPassword) {
@@ -146,6 +146,30 @@ func TestZoneErrorMapping(t *testing.T) {
 	}
 	if err := c.LeaveZone("z", 1); !errors.Is(err, apiclient.ErrNotMember) {
 		t.Errorf("leave not-member: got %v, want ErrNotMember", err)
+	}
+}
+
+// TestCreateZoneSendsNodeID asserts the create request carries node_id so the server can
+// auto-join the caller's device in the same operation (feature 015).
+func TestCreateZoneSendsNodeID(t *testing.T) {
+	var gotBody protocol.CreateZoneRequest
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/zones", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(protocol.ZoneResponse{ID: 1, Name: gotBody.Name, IsOwner: true})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	if _, err := apiclient.New(srv.URL).CreateZone("team", 42, "zone-strong-pw"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if gotBody.NodeID != 42 {
+		t.Errorf("request node_id = %d, want 42", gotBody.NodeID)
+	}
+	if gotBody.Name != "team" {
+		t.Errorf("request name = %q, want team", gotBody.Name)
 	}
 }
 

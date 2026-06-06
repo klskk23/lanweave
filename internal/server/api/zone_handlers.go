@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -14,8 +15,10 @@ import (
 const minZonePasswordLen = 8
 
 // createZone creates a password-protected zone owned by the caller and installs its
-// (empty) isolation set + accept rule. Insert + nft are atomic: on nft failure the
-// zone row is removed.
+// (empty) isolation set + accept rule. When req.NodeID names one of the caller's nodes,
+// that node is auto-joined in the same operation. The whole thing is atomic: on any
+// failure after the zone row is inserted, the zone is removed so DB and nftables stay
+// consistent.
 func (h *handlers) createZone(w http.ResponseWriter, r *http.Request) {
 	id, ok := IdentityFrom(r.Context())
 	if !ok {
@@ -37,6 +40,22 @@ func (h *handlers) createZone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the auto-join node BEFORE creating anything: a foreign/unknown node_id must
+	// not leave an orphaned zone. GetOwned conflates "absent" and "not yours" (no enum).
+	var member *store.Node
+	if req.NodeID != 0 {
+		n, err := h.store.Nodes().GetOwned(r.Context(), id.UserID, req.NodeID)
+		if err != nil {
+			if errors.Is(err, store.ErrNodeNotFound) {
+				protocol.WriteJSONError(w, http.StatusNotFound, "not_found", "Node not found.")
+				return
+			}
+			h.serverError(w, err)
+			return
+		}
+		member = n
+	}
+
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		h.serverError(w, err)
@@ -52,14 +71,40 @@ func (h *handlers) createZone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.netfw.AddZone(zone.ID); err != nil {
-		// Compensate: remove the zone so DB and nftables stay consistent.
+		// Compensate: remove the zone so DB and nftables stay consistent. (Nothing to tear
+		// down in nft since AddZone failed.)
 		if derr := h.store.Zones().Delete(r.Context(), zone.ID); derr != nil {
 			h.log.Error("failed to roll back zone after nft failure", "zone_id", zone.ID, "error", derr.Error())
 		}
 		h.serverError(w, err)
 		return
 	}
+
+	if member != nil {
+		if err := h.store.Zones().Join(r.Context(), zone.ID, member.ID); err != nil {
+			h.rollbackZone(r.Context(), zone.ID)
+			h.serverError(w, err)
+			return
+		}
+		if err := h.netfw.AddMember(zone.ID, member.IP); err != nil {
+			h.rollbackZone(r.Context(), zone.ID)
+			h.serverError(w, err)
+			return
+		}
+	}
 	writeJSON(w, http.StatusCreated, protocol.ZoneResponse{ID: zone.ID, Name: zone.Name, IsOwner: true})
+}
+
+// rollbackZone undoes a partially created zone after an auto-join step fails: delete the
+// row (cascading any membership) and best-effort destroy its nft set + rule, so neither
+// DB nor kernel keeps a zone the creator is not a consistent member of.
+func (h *handlers) rollbackZone(ctx context.Context, zoneID int64) {
+	if err := h.store.Zones().Delete(ctx, zoneID); err != nil {
+		h.log.Error("failed to roll back zone after auto-join failure", "zone_id", zoneID, "error", err.Error())
+	}
+	if err := h.netfw.DeleteZone(zoneID); err != nil {
+		h.log.Error("failed to delete zone nftables state on rollback", "zone_id", zoneID, "error", err.Error())
+	}
 }
 
 // joinZone admits one of the caller's nodes to a zone (name + password). Unknown

@@ -20,8 +20,9 @@ type fakeAPI struct {
 	zones    protocol.ZoneListResponse
 	members  protocol.ZoneMembersResponse
 
-	joinedNodeID int64
-	kickedNodeID int64
+	joinedNodeID  int64
+	kickedNodeID  int64
+	createdNodeID int64
 }
 
 func (f *fakeAPI) Login(string, string) error { f.token = "fresh-token"; return f.loginErr }
@@ -33,7 +34,8 @@ func (f *fakeAPI) Me() (protocol.MeResponse, error) {
 func (f *fakeAPI) ListNodes() (protocol.NodeListResponse, error)            { return f.nodes, nil }
 func (f *fakeAPI) ListZones() (protocol.ZoneListResponse, error)            { return f.zones, nil }
 func (f *fakeAPI) ZoneMembers(string) (protocol.ZoneMembersResponse, error) { return f.members, nil }
-func (f *fakeAPI) CreateZone(string, string) (protocol.ZoneResponse, error) {
+func (f *fakeAPI) CreateZone(_ string, nodeID int64, _ string) (protocol.ZoneResponse, error) {
+	f.createdNodeID = nodeID
 	return protocol.ZoneResponse{}, nil
 }
 func (f *fakeAPI) JoinZone(_ string, nodeID int64, _ string) error {
@@ -120,6 +122,19 @@ func TestJoinAndKickUseNodeIDs(t *testing.T) {
 	}
 	if f.kickedNodeID != 8 {
 		t.Errorf("kick used node id %d, want 8 (the member)", f.kickedNodeID)
+	}
+}
+
+func TestCreateZoneUsesThisMachineNodeID(t *testing.T) {
+	f := &fakeAPI{nodes: protocol.NodeListResponse{Nodes: []protocol.NodeResponse{
+		{ID: 42, Name: "laptop", IP: "100.127.0.2"},
+	}}}
+	c, _ := newController(t, f)
+	if err := c.CreateZone("team", "zone-strong-pw"); err != nil {
+		t.Fatal(err)
+	}
+	if f.createdNodeID != 42 {
+		t.Errorf("create used node id %d, want 42 (this machine)", f.createdNodeID)
 	}
 }
 

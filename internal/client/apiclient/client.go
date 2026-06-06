@@ -134,10 +134,11 @@ func (c *Client) Me() (protocol.MeResponse, error) {
 	return resp, err
 }
 
-// CreateZone creates a password-protected zone owned by the caller.
-func (c *Client) CreateZone(name, password string) (protocol.ZoneResponse, error) {
+// CreateZone creates a password-protected zone owned by the caller. When nodeID is
+// non-zero, that device is auto-joined to the new zone in the same request.
+func (c *Client) CreateZone(name string, nodeID int64, password string) (protocol.ZoneResponse, error) {
 	var resp protocol.ZoneResponse
-	_, err := c.do(http.MethodPost, "/api/v1/zones", true, protocol.CreateZoneRequest{Name: name, Password: password}, &resp)
+	_, err := c.do(http.MethodPost, "/api/v1/zones", true, protocol.CreateZoneRequest{Name: name, Password: password, NodeID: nodeID}, &resp)
 	return resp, err
 }
 

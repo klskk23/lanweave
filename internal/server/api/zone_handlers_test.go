@@ -170,6 +170,60 @@ func TestCreateZone(t *testing.T) {
 	}
 }
 
+func TestCreateZoneAutoJoin(t *testing.T) {
+	h := newZoneHarness(t)
+	uid, tok := h.user("alice")
+	node := h.seedNode(uid, "laptop")
+
+	// Happy path: create with an owned node_id → zone created AND the node is a member,
+	// with its IP in the real nft set (traffic-eligible, not just a DB row).
+	var z protocol.ZoneResponse
+	rec := h.req(http.MethodPost, "/api/v1/zones", tok, protocol.CreateZoneRequest{Name: "auto", Password: "zone-strong-pw", NodeID: node.ID})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create auto-join: %d %s", rec.Code, rec.Body.String())
+	}
+	decodeJSONBody(t, rec.Body.Bytes(), &z)
+	if !z.IsOwner {
+		t.Errorf("want is_owner true, got %+v", z)
+	}
+	if !h.setHas(z.ID, node.IP) {
+		t.Error("creator node IP not in zone set after auto-join")
+	}
+	var members protocol.ZoneMembersResponse
+	decodeJSONBody(t, h.req(http.MethodGet, "/api/v1/zones/auto/members", tok, nil).Body.Bytes(), &members)
+	if len(members.Members) != 1 || members.Members[0].NodeID != node.ID {
+		t.Errorf("creator not the sole member: %+v", members.Members)
+	}
+
+	// Security: a node_id the caller does NOT own → 404, and nothing is created.
+	_, bobTok := h.user("bob")
+	if r := h.req(http.MethodPost, "/api/v1/zones", bobTok, protocol.CreateZoneRequest{Name: "foreign", Password: "zone-strong-pw", NodeID: node.ID}); r.Code != http.StatusNotFound {
+		t.Errorf("foreign node_id: %d, want 404", r.Code)
+	}
+	if r := h.req(http.MethodPost, "/api/v1/zones", bobTok, protocol.CreateZoneRequest{Name: "bogus", Password: "zone-strong-pw", NodeID: 999999}); r.Code != http.StatusNotFound {
+		t.Errorf("bogus node_id: %d, want 404", r.Code)
+	}
+	// No zone leaked: bob participates in nothing, and the rejected name is still free.
+	var bobZones protocol.ZoneListResponse
+	decodeJSONBody(t, h.req(http.MethodGet, "/api/v1/zones", bobTok, nil).Body.Bytes(), &bobZones)
+	if len(bobZones.Zones) != 0 {
+		t.Errorf("foreign-node create leaked a zone: %+v", bobZones.Zones)
+	}
+	if r := h.req(http.MethodPost, "/api/v1/zones", tok, protocol.CreateZoneRequest{Name: "foreign", Password: "zone-strong-pw"}); r.Code != http.StatusCreated {
+		t.Errorf("name 'foreign' should be free after the failed create: %d", r.Code)
+	}
+
+	// Backward-compat: omitted node_id (0) → create-only, no members.
+	if r := h.req(http.MethodPost, "/api/v1/zones", tok, protocol.CreateZoneRequest{Name: "shell", Password: "zone-strong-pw"}); r.Code != http.StatusCreated {
+		t.Fatalf("create-only: %d %s", r.Code, r.Body.String())
+	}
+	var shellMembers protocol.ZoneMembersResponse
+	decodeJSONBody(t, h.req(http.MethodGet, "/api/v1/zones/shell/members", tok, nil).Body.Bytes(), &shellMembers)
+	if len(shellMembers.Members) != 0 {
+		t.Errorf("create-only zone unexpectedly has members: %+v", shellMembers.Members)
+	}
+}
+
 func TestJoinZone(t *testing.T) {
 	h := newZoneHarness(t)
 	uid, tok := h.user("alice")

@@ -1,9 +1,12 @@
 package protocol
 
-// CreateZoneRequest is the body of POST /api/v1/zones.
+// CreateZoneRequest is the body of POST /api/v1/zones. NodeID, when non-zero, is one of
+// the caller's nodes to auto-join to the new zone in the same operation; 0/omitted keeps
+// the create-only behavior.
 type CreateZoneRequest struct {
 	Name     string `json:"name"`
 	Password string `json:"password"`
+	NodeID   int64  `json:"node_id,omitempty"`
 }
 
 // ZoneResponse describes a zone the caller participates in.
