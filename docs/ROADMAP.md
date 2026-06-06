@@ -1,6 +1,6 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化。
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -25,6 +25,7 @@
 | 012 | deployment-packaging ✅                 | 运维       | 008, 011   | .deb 一键装、Windows installer 一键装|
 | 013 | windows-client-elevation ✅            | 客户端     | 010, 012   | 双击快捷方式启动即弹 UAC，建网卡成功  |
 | 014 | ci-cd-build-and-release ✅              | 运维       | 012, 013   | 打 v* tag → 测试门禁 → 出 .deb+安装器 → 自动建 draft Release |
+| 015 | zone-create-auto-join ✅                | 客户端/服务端 | 005, 011   | 创建 zone 后本机 node 自动入组,无需二次 join         |
 
 ---
 
@@ -270,6 +271,27 @@
 **发布前 TODO（不阻塞搭流水线）**
 - 确认 Wintun 预编译二进制再分发许可（WireGuard LLC）允许打进 installer。
 - 把 `wintun-0.14.1` 官方 SHA256 填入 workflow。
+
+---
+
+### 015 — zone-create-auto-join
+**背景**
+- 现状：`POST /api/v1/zones`（创建）与 `POST /api/v1/zones/{name}/join`（入组）是两步。用户在主面板「创建 zone」后,自己并不在该 zone 里,还得再点「加入 zone」、重输密码才成为成员,反直觉。
+- 期望：创建者的当前设备节点在创建的同一操作内直接成为成员。
+
+**范围**
+- **协议**：`CreateZoneRequest` 增加可选字段 `node_id`（0/省略 = 旧的「只建不入」行为,向后兼容）。
+- **服务端**（`createZone`,原子语义）：若 `node_id != 0` —— **先**校验节点归属（复用 `Nodes().GetOwned(userID, node_id)`,不属于则 404 且不建 zone）→ 建 zone → `AddZone` → `Zones().Join` + nft 把该节点 IP 加进 zone set;建 zone 之后任一步失败,复用现有「删 zone + 级联 + nft 清理」补偿路径(不引入新 SQL 事务)。不变量:带 `node_id` 时结果要么{zone 建好 + 创建者已入组 + nft 一致},要么{什么都没建 + 报错}。
+- **客户端**：`apiclient.CreateZone` 增 `nodeID` 形参写进请求体;`panel.Controller.CreateZone` 内部解析当前设备 node id 并传入(复刻现有 JoinZone 解析);GUI 创建永远自动入组,无 opt-out 勾选;「加入 zone」按钮保留(用于加入他人 zone);建完刷新成员列表到能看到自己即达标,不额外弹提示。
+
+**验收**
+- 主面板创建 zone 后,无需任何额外操作,成员列表立即包含本机 node。
+- 服务端集成测试(真 nft,`unshare -rUn`)：带合法自有 `node_id` 建 zone → 节点是成员且 nft zone set 含其 IP;带他人 `node_id` → 拒绝且 DB/nft 无残留;不带 `node_id` → 旧行为(建好、无成员)。
+- 现有不带 `node_id` 的 `CreateZone` 调用与测试保持绿(向后兼容)。
+
+**不做**
+- 改动「加入他人 zone」流程(仍走 join,需密码)。
+- nft 中途失败→补偿删 zone 的确定性注入测试(不好可靠触发,与现有同类补偿路径未单测保持一致)。
 
 ---
 
