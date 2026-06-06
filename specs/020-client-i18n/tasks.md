@@ -113,8 +113,8 @@ description: "Task list for client-i18n"
 
 - [X] T016 [P] 对 `internal/client/i18n`、`internal/client/ui`、`cmd/lanweave-client` 跑 `gofmt -l`、`go vet`、`staticcheck`(三者干净,宪法 I);`unshare -rUn sh -c 'ip link set lo up && go test ./...'` 全绿(SC-005,宪法 I/II)。注:`ui`/`cmd` 为 `//go:build gui`,vet/staticcheck 需带 `-tags gui`。
 - [X] T017 [P] 安全/边界核对:两套 JSON 目录**不含**任何密钥/口令/邀请码/指纹(宪法 Secrets;敏感值仅经 `%s` 占位由 ui 注入);确认未改动服务端或底层 `errors.New`(FR-009);确认语言偏好仅在 Fyne Preferences、**未**写入 `state.Record`/state.json(FR-007)。
-- [ ] T018 真机 M10 通览:走完向导三步 + 面板(节点/区域 tab、创建/加入/成员/改密/删除/踢人确认、防火墙开关、退出登录确认),无残留英文硬编码、无可见原始键名/空白。
-- [ ] T019 [P] 按 `quickstart.md` 验收矩阵逐条对齐(M1–M10 + 无头映射),勾选。
+- [X] T018 真机 M10 通览:走完向导三步 + 面板(节点/区域 tab、创建/加入/成员/改密/删除/踢人确认、防火墙开关、退出登录确认),无残留英文硬编码、无可见原始键名/空白。
+- [X] T019 [P] 按 `quickstart.md` 验收矩阵逐条对齐(M1–M10 + 无头映射),勾选。
 
 ---
 
