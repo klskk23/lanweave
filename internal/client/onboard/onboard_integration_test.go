@@ -128,6 +128,13 @@ func TestOnboardIntegrationCreateAccount(t *testing.T) {
 	if got, err := state.Load(statePath); err != nil || got.IP != "100.127.0.2" {
 		t.Errorf("state not persisted: %+v %v", got, err)
 	}
+	tok, err := fk.Get(keyring.SessionTokenName)
+	if err != nil || len(tok) == 0 {
+		t.Errorf("session token not cached after provision: %v", err)
+	}
+	if string(tok) != client.Token() {
+		t.Errorf("cached session token = %q, want client token %q", tok, client.Token())
+	}
 }
 
 // TestOnboardIntegrationSignIn reuses the account-creation path, then signs in as the same
@@ -143,12 +150,44 @@ func TestOnboardIntegrationSignIn(t *testing.T) {
 	}
 
 	// Now sign in (no invite) and register a second device.
-	second := &onboard.Provisioner{API: apiclient.New(url, apiclient.WithRootCAs(pool)), Keys: keyring.NewFake(), StatePath: filepath.Join(t.TempDir(), "s2.json"), ServerURL: url}
+	secondClient := apiclient.New(url, apiclient.WithRootCAs(pool))
+	secondKeys := keyring.NewFake()
+	second := &onboard.Provisioner{API: secondClient, Keys: secondKeys, StatePath: filepath.Join(t.TempDir(), "s2.json"), ServerURL: url}
 	rec, err := second.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "bob", Password: "password123"}, "desktop")
 	if err != nil {
 		t.Fatalf("sign-in provision: %v", err)
 	}
 	if rec.IP == "" || rec.NodeName != "desktop" {
 		t.Errorf("second device not registered: %+v", rec)
+	}
+	if tok, err := secondKeys.Get(keyring.SessionTokenName); err != nil || len(tok) == 0 || string(tok) != secondClient.Token() {
+		t.Errorf("session token not cached on sign-in path: tok=%q err=%v", tok, err)
+	}
+}
+
+// TestColdStartReusesSession models a cold start: after onboarding caches the session
+// token, a brand-new client seeded only with that token (as the panel's LoadSession does)
+// authenticates a protected call without a second sign-in.
+func TestColdStartReusesSession(t *testing.T) {
+	url, cert, invite := realServer(t)
+	pool := trustPool(cert)
+
+	fk := keyring.NewFake()
+	statePath := filepath.Join(t.TempDir(), "lanweave", "state.json")
+	p := &onboard.Provisioner{API: apiclient.New(url, apiclient.WithRootCAs(pool)), Keys: fk, StatePath: statePath, ServerURL: url}
+	if _, err := p.Provision(onboard.Credentials{Mode: onboard.CreateAccount, Invite: invite, Username: "carol", Password: "password123"}, "laptop"); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	tok, err := fk.Get(keyring.SessionTokenName)
+	if err != nil || len(tok) == 0 {
+		t.Fatalf("session token not cached: %v", err)
+	}
+	// A fresh client with no in-memory token, seeded only from the secure store, must
+	// authenticate a protected call — proving the persisted session alone is reused.
+	fresh := apiclient.New(url, apiclient.WithRootCAs(pool))
+	fresh.SetToken(string(tok))
+	if _, err := fresh.ListNodes(); err != nil {
+		t.Fatalf("persisted session token did not authenticate a protected call: %v", err)
 	}
 }

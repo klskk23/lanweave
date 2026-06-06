@@ -21,6 +21,7 @@ type fakeAPI struct {
 	listNodes     func() (protocol.NodeListResponse, error)
 	serverInfo    protocol.ServerInfoResponse
 	serverInfoErr error
+	token         string // session token returned after a successful Login
 
 	registerCalls     int
 	registerNodeCalls int
@@ -28,6 +29,7 @@ type fakeAPI struct {
 
 func (f *fakeAPI) Register(_, _, _ string) error { f.registerCalls++; return f.registerErr }
 func (f *fakeAPI) Login(_, _ string) error       { return f.loginErr }
+func (f *fakeAPI) Token() string                 { return f.token }
 func (f *fakeAPI) RegisterNode(name, pub string) (protocol.NodeResponse, error) {
 	f.registerNodeCalls++
 	if f.registerNode != nil {
@@ -96,6 +98,43 @@ func TestProvisionSignIn(t *testing.T) {
 	}
 }
 
+func TestProvisionPersistsSession(t *testing.T) {
+	api := &fakeAPI{serverInfo: okServerInfo(), token: "tok-xyz"}
+	p, fk, _ := newProvisioner(t, api)
+
+	if _, err := p.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "alice", Password: "pw"}, "laptop"); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	tok, err := fk.Get(keyring.SessionTokenName)
+	if err != nil || string(tok) != "tok-xyz" {
+		t.Errorf("session token not cached after provision: got %q err=%v, want %q", tok, err, "tok-xyz")
+	}
+}
+
+// failOnSessionSet wraps a Store and fails only when caching the session token, proving
+// Provision surfaces a final-step persistence failure instead of returning a bad success.
+type failOnSessionSet struct {
+	keyring.Store
+}
+
+func (f failOnSessionSet) Set(name string, secret []byte) error {
+	if name == keyring.SessionTokenName {
+		return errors.New("vault write failed")
+	}
+	return f.Store.Set(name, secret)
+}
+
+func TestProvisionSessionSaveFailure(t *testing.T) {
+	api := &fakeAPI{serverInfo: okServerInfo(), token: "tok-xyz"}
+	statePath := filepath.Join(t.TempDir(), "lanweave", "state.json")
+	p := &onboard.Provisioner{
+		API: api, Keys: failOnSessionSet{keyring.NewFake()}, StatePath: statePath, ServerURL: "https://vpn.example.com",
+	}
+	if _, err := p.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "a", Password: "p"}, "laptop"); err == nil {
+		t.Fatal("expected provision to fail when the session token cannot be cached")
+	}
+}
+
 func TestStartupTarget(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "lanweave", "state.json")
 	// Absent → wizard.
@@ -122,6 +161,9 @@ func TestProvisionAuthAndNameErrors(t *testing.T) {
 	if _, err := fk.Get(keyring.DeviceKeyName); !errors.Is(err, keyring.ErrNotFound) {
 		t.Error("key stored despite auth failure (auth happens before keygen)")
 	}
+	if _, err := fk.Get(keyring.SessionTokenName); !errors.Is(err, keyring.ErrNotFound) {
+		t.Error("session token stored despite auth failure (token persisted only after full success)")
+	}
 
 	// Duplicate device name surfaces ErrNodeNameTaken for the UI to recover.
 	api2 := &fakeAPI{serverInfo: okServerInfo(), registerNode: func(_, _ string) (protocol.NodeResponse, error) {
@@ -134,24 +176,30 @@ func TestProvisionAuthAndNameErrors(t *testing.T) {
 }
 
 func TestCancelCleanup(t *testing.T) {
-	api := &fakeAPI{serverInfo: okServerInfo()}
+	api := &fakeAPI{serverInfo: okServerInfo(), token: "tok-xyz"}
 	p, fk, statePath := newProvisioner(t, api)
 	if _, err := p.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "a", Password: "p"}, "laptop"); err != nil {
 		t.Fatal(err)
 	}
-	// Both the vault key and the state record exist after a successful provision.
+	// The vault key, the session token, and the state record all exist after a successful provision.
 	if _, err := fk.Get(keyring.DeviceKeyName); err != nil {
 		t.Fatal("precondition: key should exist")
+	}
+	if tok, err := fk.Get(keyring.SessionTokenName); err != nil || len(tok) == 0 {
+		t.Fatal("precondition: session token should exist")
 	}
 	if !state.Exists(statePath) {
 		t.Fatal("precondition: state should exist")
 	}
-	// Cleanup removes both, leaving a fresh machine.
+	// Cleanup removes all three, leaving a fresh machine.
 	if err := p.Cleanup(); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
 	if _, err := fk.Get(keyring.DeviceKeyName); !errors.Is(err, keyring.ErrNotFound) {
 		t.Error("vault key remains after cleanup")
+	}
+	if _, err := fk.Get(keyring.SessionTokenName); !errors.Is(err, keyring.ErrNotFound) {
+		t.Error("session token remains after cleanup")
 	}
 	if state.Exists(statePath) {
 		t.Error("state record remains after cleanup")

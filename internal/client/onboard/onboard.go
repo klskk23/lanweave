@@ -30,6 +30,9 @@ type apiClient interface {
 	RegisterNode(name, pubKey string) (protocol.NodeResponse, error)
 	ListNodes() (protocol.NodeListResponse, error)
 	ServerInfo() (protocol.ServerInfoResponse, error)
+	// Token returns the session token set by Login; persisted after a successful
+	// Provision so the panel reuses the session without a second sign-in.
+	Token() string
 }
 
 // The real REST client must satisfy the onboarding interface.
@@ -118,6 +121,13 @@ func (p *Provisioner) Provision(c Credentials, nodeName string) (state.Record, e
 	if err := state.Save(p.StatePath, rec); err != nil {
 		return state.Record{}, fmt.Errorf("save state: %w", err)
 	}
+	// Cache the session token last — only after every prior step has succeeded — so the
+	// management panel reuses this sign-in instead of prompting again. Persisting it here
+	// keeps the device key, state record, and session token consistently present (and
+	// consistently absent after Cleanup).
+	if err := p.Keys.Set(keyring.SessionTokenName, []byte(p.API.Token())); err != nil {
+		return state.Record{}, fmt.Errorf("cache session: %w", err)
+	}
 	return rec, nil
 }
 
@@ -146,11 +156,12 @@ func (p *Provisioner) registerDevice(nodeName, pub string) (string, error) {
 	}
 }
 
-// Cleanup deletes the stored device key and clears any partial state record so a
-// cancelled or failed setup leaves the machine fresh for the next launch.
+// Cleanup deletes the stored device key and cached session token and clears any partial
+// state record so a cancelled or failed setup leaves the machine fresh for the next launch.
 func (p *Provisioner) Cleanup() error {
 	return errors.Join(
 		p.Keys.Delete(p.keyName()),
+		p.Keys.Delete(keyring.SessionTokenName),
 		state.Clear(p.StatePath),
 	)
 }

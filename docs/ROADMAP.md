@@ -1,6 +1,6 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure）。
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化）。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -29,6 +29,8 @@
 | 016 | windows-app-icon ✅                      | 客户端/运维 | 014        | EXE / Fyne 窗口 / 安装器 / 卸载器 / ARP 5 处均显示 lanweave 图标 |
 | 017 | client-logout-and-tls-optin ✅          | 客户端     | 004, 011   | 退出登录(断连 + 注销本机 node + 回填服务器 URL);证书错误时弹窗可选「继续(不安全)」,会话级不持久 |
 | 018 | client-firewall-and-tofu-pin ✅          | 客户端     | 010, 017   | 客户端可开关入站防火墙规则放行 VPN 网段(默认关);证书首次信任后钉扎(TOFU),取代 017 会话级 insecure |
+| 019 | client-session-persist-fix              | 客户端     | 009, 011   | 向导登录/注册完成后直接进面板,不再二次要求登录;冷启动复用已缓存会话 |
+| 020 | client-i18n                             | 客户端     | 009, 011   | 客户端 UI 中/英双语,启动按系统语言,可手动切换(重启生效) |
 
 ---
 
@@ -393,6 +395,55 @@
 **依赖 / 关联**
 - 依赖 017（复用 panel / state / apiclient，取代其 insecure FR）、010（隧道连接状态驱动防火墙生命周期）。
 - 017 的 T021 Windows 手工 GUI 矩阵为独立欠项，与本切片并行补。
+
+---
+
+### 019 — client-session-persist-fix
+**背景**
+- onboarding（向导登录 / 注册）拿到的 bearer token 只存在向导那个 apiclient 内存里,从不写 keyring。向导结束 `showHome` 新建无 token 的 client → 面板 `start()→LoadSession()` 读 keyring 为空 → 二次弹「Sign in」登录框。注册路径（`Authenticate` 内 Register→Login）同因同果。
+- 隐藏面:该 token 实际只在面板手动登录过一次后(`Controller.SignIn`)才进 keyring,故**每次冷启动首登也会弹**,直到登录过一次。一处修复同时消掉向导后弹框与冷启动弹框。
+
+**范围**
+- `onboard.Provision()` **全流程成功后**（authenticate → 注册设备 → 存 state 均过）把 `API.Token()` 写入 `keyring.SessionTokenName`,使 token / 设备私钥 / state.json 三者一致落盘。
+- onboard 的 `apiClient` interface 增 `Token() string`（`*apiclient.Client` 已实现,补接口声明）。
+- `Cleanup()` 追加删除 `SessionTokenName` → 取消 / 失败 onboarding = 彻底空白态（token / 私钥 / state 全清）。
+- **不改** `showHome` / 面板:面板 `start()→LoadSession()` 自然从 keyring 读回 token 并经 `Me()` 校验通过,不再弹框（靠 keyring 往返,无需把 client 实例传进去）。
+
+**验收**
+- 干净环境走完向导（登录 或 注册）→ 直接进主面板,不再二次要求登录。
+- onboard 包无头集成测试（真服务器,复用 `onboard_integration_test.go`）:Provision 成功后 keyring 存在 `SessionTokenName`;Cleanup 后该项不存在。
+- 已 onboard 过的冷启动直接进面板,不弹登录。
+
+**不做**
+- 触碰 `showHome` / 面板的会话加载逻辑（keyring 往返已足够）。
+- token 过期 / 刷新机制（沿用现有 `LoadSession→Me()` 失效再弹登录）。
+
+---
+
+### 020 — client-i18n
+**背景**
+- 客户端 GUI 全硬编码英文（`internal/client/ui/` 下 panel.go ~116、wizard.go ~66 个用户可见字面量 + `friendly` / `panelMessage` / `tunnelMessage` 错误文案）。需中文 / 英文双语,启动按系统语言,可手动切换。控制器（panel、onboard）无 UI 只回传 typed error,字符串都在 ui 层映射,边界干净。
+
+**范围**
+- **翻译范围**:仅 `internal/client/ui/` 用户可见字符串（界面文案 + typed-error 映射层 `friendly` / `panelMessage` / `tunnelMessage`）。服务端、底层零散 `errors.New` 不动,保持「字符串只在 ui 层」边界。约 180 个字符串抽成翻译键（无论用哪种方案抽取工作量一致）。
+- **机制**:Fyne 内置 `lang` 包（embed 翻译 JSON + `lang.L`）,系统 locale 自动检测白送。
+- **切换时机**:重启生效（选完提示 / 自动重启）,不做运行时实时重绘——VPN 客户端切语言极低频,重启代价可忽略,且避免给 wizard / panel 加「重建当前视图」管线。
+- **语言**:zh-Hans + en。
+- **偏好存储**:Fyne Preferences（`a.Preferences()`,app 已是 `app.NewWithID("com.lanweave.client")`）,`app.New` 后即可读,与 onboarding 状态解耦。**不能放 `state.Record`**——硬约束:语言要在首次向导、state.json 尚不存在时就能读到。
+- **选择器**:向导顶部（`render()` 顶区）+ 面板页脚 各一个三项下拉「跟随系统 / English / 中文」,复用同一偏好读写;空 pref = 跟随系统（首次默认）,选具体语言压过系统检测,选回「跟随系统」清空 pref 回到 auto。
+
+**plan 阶段必验研究点**
+- Fyne `lang` 如何让「用户手动选的语言」在启动时**压过系统 locale**（默认按系统 locale 选,运行时强制设定无确定一等公民 API,落地可能靠启动前设 locale / `LANG` env）;research.md 专门验一条。
+
+**验收**
+- 中文系统启动默认中文,英文系统默认英文;手动切到另一语言并重启后界面随之改变;选「跟随系统」回到系统语言。
+- GUI（Fyne `//go:build gui`）中 / 英两套 + 跟随系统 + 重启生效 + 向导 / 面板两处切换的 Windows 手工验收矩阵（同 018 风格,写入 020 `quickstart.md`）。
+- 翻译键抽取不破坏现有无头测试;`unshare -rUn go test ./...` 仍全绿（本期不动 SQLite / nftables / WireGuard,宪法 II 不受影响）。
+
+**不做**
+- 服务端日志 / 底层 `errors.New` 散字符串汉化。
+- 运行时实时切换（改为重启生效）。
+- 第三种及以上语言。
 
 ---
 
