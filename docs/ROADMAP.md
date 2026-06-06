@@ -1,6 +1,6 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互。
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure）。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -28,6 +28,7 @@
 | 015 | zone-create-auto-join ✅                | 客户端/服务端 | 005, 011   | 创建 zone 后本机 node 自动入组,无需二次 join         |
 | 016 | windows-app-icon ✅                      | 客户端/运维 | 014        | EXE / Fyne 窗口 / 安装器 / 卸载器 / ARP 5 处均显示 lanweave 图标 |
 | 017 | client-logout-and-tls-optin ✅          | 客户端     | 004, 011   | 退出登录(断连 + 注销本机 node + 回填服务器 URL);证书错误时弹窗可选「继续(不安全)」,会话级不持久 |
+| 018 | client-firewall-and-tofu-pin            | 客户端     | 010, 017   | 客户端可开关入站防火墙规则放行 VPN 网段(默认关);证书首次信任后钉扎(TOFU),取代 017 会话级 insecure |
 
 ---
 
@@ -353,6 +354,45 @@
 **待 plan 阶段确认**
 - 服务端 `DELETE /api/v1/nodes/{id}` 是否已实现 + owner 校验（只能删自己的 node）。
 - 客户端 WG 隧道 teardown 入口（对称于 013 提权建网卡路径）。
+
+---
+
+### 018 — client-firewall-and-tofu-pin
+**背景**
+- 017 交付后留两处可改进：(1) Windows 客户端起隧道后，本机对同 zone 对端是否暴露由 Windows Defender 默认入站策略决定，缺一个用户可控的「放行 VPN 网段入站」开关；(2) 017 的 insecure-TLS 是会话级、每次启动撞证书错误都要重新弹窗确认，对自签 / 内网 CA 的长期用户反复操作烦，体验差。
+- 本切片做两件强相关的事（**共用一次 state schema 迁移**），并显式 supersede 017 的 insecure 相关需求。
+
+**范围**
+- **客户端防火墙控制（默认关）**：
+  - 规则形态：仅入站的 Windows Defender 防火墙规则，`remoteip=100.127.0.0/16`、全端口 + ICMP、`profile=any`，经 `netsh advfirewall firewall add rule` 下发；**仅 Windows**（Linux / 其它平台 no-op）；默认 OFF。
+  - 生命周期：规则存在 ⟺ (开关 ON ∧ 隧道 Connected)。连接成功且开关 ON 时加；已连接时拨 ON 立即加；断开 / 拨 OFF / 登出 / 退出程序时删。
+  - 防残留：**具名规则**（如 `lanweave-vpn-inbound`）+ **幂等加**（加前先按名删）+ **启动清扫**（启动时按名删一次，清掉上次崩溃的孤儿）。规则下发逻辑挂在 connect/disconnect 与开关回调上，`netsh` 执行放接口 seam 后面以便无头测决策逻辑。
+  - UI：主面板 footer 一个 `widget.Check`「Allow inbound from VPN peers (100.127.0.0/16)」；拨 ON 即落库 + 应用，拨 OFF 即落库 + 删，均静默；旁边一行**内联警告标签**说明「开启会让同 VPN 网段(zone)内对端访问本机所有本地服务 / 端口」（不弹确认框）。
+- **TOFU 证书钉扎（取代 017 会话级 insecure）**：
+  - 首次连某 server，证书过不了系统 CA 时弹 TOFU 提示「在本设备信任此证书?」；接受 → 存**叶证书 SHA-256 指纹**进 state.json，后续静默通过。
+  - 验证规则：证书通过 ⟺ (指纹 == 已钉指纹) **或** (过系统 CA)。按 server 钉；切换 server URL 重新走 TOFU。
+  - 证书变更：新增 typed error `ErrCertChanged`，弹更重的「证书已变更」警告；接受则覆盖旧钉。
+  - 指示器两分：TOFU 已钉（自签但已信任）→「self-signed (trusted on this device)」中性提示；`--insecure` → 沿用「⚠ certificate not verified」警告条。
+  - 保留 `--insecure` CLI flag（完全不验证的逃生口）。
+  - **取代** 017 的 FR-009 / 010 / 011 / 013 / 014（反应式会话级 opt-in）。
+- **state schema 迁移（把两件事绑成原子单元）**：一次 `SchemaVersion 1→2`，同时加 `PinnedCertSHA256 string`（空 = 未钉）+ `FirewallAllowVPN bool`（false = 关）；旧 v1 记录加载时两者取零值（未钉 + 防火墙关），无缝。
+- **修订 DESIGN.md（同 PR）**：§275 / §360 从「反应式会话 opt-in」改为「TOFU 持久信任」；补「客户端可添加入站规则放行 VPN 网段」一条；§11 风险登记：开启防火墙开关暴露本机服务给同 zone 对端（已接受、默认关、用户可控）。
+
+**验收**
+- 防火墙：Windows 上连接后拨 ON →（管理员）`netsh advfirewall firewall show rule name=lanweave-vpn-inbound` 出现该规则（remoteip=100.127.0.0/16、入站）；拨 OFF / 断开 / 登出 / 退出 → 规则消失；崩溃后重启 → 启动清扫删掉残留再按状态重建；开关状态重启后保持（持久化）。
+- TOFU：对自签 server，首连弹 TOFU 提示 → 接受 → 连接成功且 state.json 出现指纹；重启再连**不再弹窗**（已钉，静默过）；服务器换证书 → 弹「证书已变更」重警告，接受覆盖。
+- headless 测（`panel.Controller` + fake `api` / 接口 seam）：logout 仍清理、防火墙「何时加 / 删」决策逻辑、TOFU 指纹钉扎 / 比对、`ErrCertChanged` 路径（httptest 自签走真实 TLS 往返）；旧 v1 state.json 加载迁移到 v2 默认值。
+- GUI（Fyne `//go:build gui`）与 `netsh` 实际执行：Windows 手工验收矩阵（类似 017 T021）。
+
+**不做**
+- Linux / macOS 桌面防火墙（仅 Windows 有此需求，他处 no-op）。
+- 自动信任任何证书 / 关闭 TOFU 首次确认（首次仍需用户显式信任）。
+- 防火墙按端口 / 协议细粒度放行（本期只做「全放行 VPN 网段」单开关）。
+- 把会话级 `--insecure` 也持久化（TOFU 已替代；`--insecure` 保持每次显式传）。
+
+**依赖 / 关联**
+- 依赖 017（复用 panel / state / apiclient，取代其 insecure FR）、010（隧道连接状态驱动防火墙生命周期）。
+- 017 的 T021 Windows 手工 GUI 矩阵为独立欠项，与本切片并行补。
 
 ---
 
