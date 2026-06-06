@@ -46,7 +46,28 @@ if [ ! -f "$CONF" ]; then
     echo "lanweave:   3) delete $PWFILE."
 fi
 
+ufw disable >/dev/null 2>&1 || true
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl enable --now lanweaved.service >/dev/null 2>&1 || true
+
+cat << "EOF" > /usr/local/bin/lanweave-invite-codegen.sh
+#!/bin/bash
+which jq &>/dev/null || { echo "Please run: sudo apt install jq" >&2; exit 1; }
+set -e
+CONFIG_FILE=/etc/lanweave/config.toml
+function filterConfig {
+        KEY=$1
+        cat $CONFIG_FILE | grep -e "$KEY" | awk -F'=' '{print $2}' | tr -d  '[:space:]\"'
+}
+USERNAME=$(filterConfig username)
+PASSWORD=$(filterConfig password)
+PORT=$(filterConfig listen[^_]|cut -d':' -f2)
+ADMIN_DATA=$(jq -n --arg u "$USERNAME" --arg p "$PASSWORD" '{"username": $u, "password": $p}')
+TOKEN=$(curl -sk "https://localhost:$PORT/api/v1/login" -d "$ADMIN_DATA" | jq -r .token)
+# Get an invite code
+INVITE_CODE=$(curl -sk -X POST "https://localhost:$PORT/api/v1/admin/invites" -H "Authorization: Bearer $TOKEN" | jq -r .code)
+echo -e "Invite code: \033[32m$INVITE_CODE\033[0m"
+EOF
+chmod +x /usr/local/bin/lanweave-invite-codegen.sh
 
 exit 0
