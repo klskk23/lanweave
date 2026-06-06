@@ -78,10 +78,9 @@ func (p *Panel) build() fyne.CanvasObject {
 	)
 
 	// Firewall toggle (feature 018): opting in installs a host inbound-allow rule while connected,
-	// letting same-subnet VPN peers reach this device. It is OFF by default and persisted; a
-	// permanent inline warning states the exposure (no confirm dialog — enabling it is reversible
-	// and user-initiated). The handler persists the preference and reconciles the rule against the
-	// current connection state (FR-012/014).
+	// letting same-subnet VPN peers reach this device. It is OFF by default and persisted (no confirm
+	// dialog — enabling it is reversible and user-initiated). The handler persists the preference and
+	// reconciles the rule against the current connection state (FR-012/014).
 	fwCheck := widget.NewCheck("Allow inbound from VPN peers ("+firewall.VPNSubnet+")", nil)
 	fwCheck.SetChecked(p.ctrl.FirewallAllowed())
 	fwCheck.OnChanged = func(on bool) {
@@ -89,8 +88,6 @@ func (p *Panel) build() fyne.CanvasObject {
 			dialog.ShowError(errors.New(panelMessage(err)), p.win)
 		}
 	}
-	fwWarn := widget.NewLabelWithStyle("Enabling this lets any peer on the VPN subnet reach every "+
-		"service on this device.", fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
 
 	// Log out sits in a footer, deliberately away from the Connect/zone primary controls so
 	// it isn't triggered by accident (FR-001). The footer also hosts the persistent trust
@@ -101,7 +98,6 @@ func (p *Panel) build() fyne.CanvasObject {
 	bottom := container.NewVBox(
 		widget.NewSeparator(),
 		fwCheck,
-		fwWarn,
 		container.NewBorder(nil, nil, container.NewHBox(p.insecureLbl, p.pinnedLbl), logoutBtn),
 	)
 	p.refreshTrust()
