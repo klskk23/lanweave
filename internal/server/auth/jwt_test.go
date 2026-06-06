@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -29,8 +30,11 @@ func TestIssueVerifyRoundTrip(t *testing.T) {
 func TestVerifyRejectsTampered(t *testing.T) {
 	m := auth.NewJWTManager(testSecret, time.Hour)
 	tok, _ := m.Issue(auth.Claims{UserID: 1, Username: "bob"})
-	// Flip the last character of the signature.
-	tampered := tok[:len(tok)-1] + flip(tok[len(tok)-1:])
+	// Flip the FIRST character of the signature. (The final base64url char of an
+	// HMAC-SHA256 signature carries unused low bits, so flipping the last char can
+	// leave the decoded signature bytes unchanged — a flaky no-op tamper.)
+	i := strings.LastIndexByte(tok, '.')
+	tampered := tok[:i+1] + flip(tok[i+1:i+2]) + tok[i+2:]
 	if _, err := m.Verify(tampered); err == nil {
 		t.Fatal("expected tampered token to be rejected")
 	}
