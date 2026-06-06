@@ -1,6 +1,6 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化）。
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化），021 为服务端可选明文 HTTP 监听（供反向代理终止 TLS）。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -31,6 +31,7 @@
 | 018 | client-firewall-and-tofu-pin ✅          | 客户端     | 010, 017   | 客户端可开关入站防火墙规则放行 VPN 网段(默认关);证书首次信任后钉扎(TOFU),取代 017 会话级 insecure |
 | 019 | client-session-persist-fix ✅           | 客户端     | 009, 011   | 向导登录/注册完成后直接进面板,不再二次要求登录;冷启动复用已缓存会话 |
 | 020 | client-i18n ✅                           | 客户端     | 009, 011   | 客户端 UI 中/英双语,启动按系统语言,可手动切换(重启生效) |
+| 021 | server-http-mode                        | 服务端     | 001        | 服务端可配 tls=false 监听明文 HTTP(供反代终止 TLS);默认仍 HTTPS,缺 cert 仍硬失败,现存配置不降级 |
 
 ---
 
@@ -444,6 +445,31 @@
 - 服务端日志 / 底层 `errors.New` 散字符串汉化。
 - 运行时实时切换（改为重启生效）。
 - 第三种及以上语言。
+
+---
+
+### 021 — server-http-mode
+**背景**
+- 服务端现强制 TLS（`config.go` 校验必须有可读 `tls_cert`/`tls_key`，`app.go` 恒 `ListenAndServeTLS`）。希望支持在 nginx/Caddy 等反向代理终止 TLS 后，服务端只监听本地明文 HTTP。控制面 REST 无状态、用 bearer token，不依赖自身 scheme；数据面 WireGuard 始终加密——反代终止 TLS 不破坏任何服务端逻辑（已核验：限流为全局非按-IP；无 cookie / secure flag / `r.TLS` / 绝对 URL 逻辑；`RemoteAddr` 仅用于访问日志）。
+
+**范围**
+- **仅服务端**。客户端零改动：仍连反代的 `https://` 公网地址，TOFU / 证书 / `--insecure` 逻辑不变；数据面 WireGuard 不变。
+- **开关**：`[server] tls = false` 才走明文；默认（不写）= HTTPS。⚠️ **实现硬约束**：开关零值必须是安全的 TLS——现存未写该键的配置升级后必须仍 HTTPS（用 load-time 默认 `true`，或反转字段为 `listen_plaintext` 使零值=TLS-on），**绝不静默降级明文**。
+- **cert/key**：仅 TLS 模式要求可读；TLS 模式下缺 / 坏 cert 仍**硬失败**（不静默降级）。HTTP 模式忽略 cert/key。
+- **绑定告警**：HTTP 模式 + 非回环地址（含 `0.0.0.0`）→ 启动打一条 WARN（提示需反代且勿暴露公网），**不拦截**（兼容 Docker 独立代理容器绑 `0.0.0.0`）。
+- **打包**：仅配置开关。postinstall 照旧生成自签证书、默认 HTTPS；反代运维手动改 `tls=false`，未用到的自签证书无害留着。
+
+**DESIGN.md 同步（宪法强制，同 PR）**
+- 放宽控制面「全部 HTTPS」措辞为「HTTPS，或 TLS 终止反代后的明文 HTTP」；§11 已知风险新增一条接受项（显式 `tls=false` 才明文、须上游 TLS、勿暴露明文监听公网）；修正 `config.toml.example` 第 7 行「HTTPS only; there is no plaintext listener」。
+
+**验收**
+- `tls=false` 起服务，明文 http 客户端打通受保护调用；`tls=true`（或缺省）缺 cert/key 仍硬失败；HTTP 模式 + `0.0.0.0` 启动有 WARN；**现存 TLS 配置升级后仍 HTTPS**（回归）。
+- 真实服务端（WG / nft 照常 boot）集成测试覆盖上述（宪法 II，不 mock）。
+
+**不做**
+- `X-Forwarded-For` / 可信代理（限流本就全局、无安全影响；反代后日志记代理 IP 作为已知小限制）。
+- postinstall 增 HTTP 安装模式（证书生成 / 默认配置不变）。
+- 任何客户端改动。
 
 ---
 
