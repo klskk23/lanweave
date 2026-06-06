@@ -40,4 +40,4 @@ jobs:
       - name: Pre-download modules (network is unavailable inside the netns)
         run: go mod download
       - name: Test (real deps, rootless netns)
-        run: unshare -rUn go test ./...
+        run: unshare -rUn bash -c 'ip link set lo up && go test ./...'
