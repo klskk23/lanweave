@@ -1,6 +1,6 @@
 使用中文对话
 <!-- SPECKIT START -->
-Active feature plan: specs/019-client-session-persist-fix/plan.md
+Active feature plan: specs/020-client-i18n/plan.md
 
 Project-wide design is frozen in DESIGN.md; slice list is in docs/ROADMAP.md;
 governing principles are in .specify/memory/constitution.md. For the current

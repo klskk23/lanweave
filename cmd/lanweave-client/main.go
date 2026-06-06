@@ -10,9 +10,11 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/lang"
 
 	"lanweave/internal/client/apiclient"
 	"lanweave/internal/client/firewall"
+	"lanweave/internal/client/i18n"
 	"lanweave/internal/client/keyring"
 	"lanweave/internal/client/onboard"
 	"lanweave/internal/client/panel"
@@ -37,6 +39,10 @@ func main() {
 	flag.Parse()
 
 	a := app.NewWithID("com.lanweave.client")
+	// Pick the UI language before building any view: a saved preference (set via the in-app
+	// language selector) wins; an empty preference follows the system locale. Must run before
+	// the first NewWizard/NewPanel and is independent of the local state file.
+	i18n.Init(a.Preferences().StringWithFallback("ui.language", ""), string(lang.SystemLocale()))
 	a.SetIcon(ui.AppIcon())
 	w := a.NewWindow("lanweave " + version)
 	w.Resize(fyne.NewSize(440, 380))

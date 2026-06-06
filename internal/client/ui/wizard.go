@@ -13,6 +13,7 @@ import (
 
 	"lanweave/internal/client/apiclient"
 	"lanweave/internal/client/firewall"
+	"lanweave/internal/client/i18n"
 	"lanweave/internal/client/keyring"
 	"lanweave/internal/client/onboard"
 	"lanweave/internal/client/panel"
@@ -56,10 +57,10 @@ func (z *Wizard) Start() { z.stepServer() }
 func (z *Wizard) render(title string, body fyne.CanvasObject, onBack, onNext func(), nextLabel string, focus fyne.Focusable) {
 	header := widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
-	cancel := widget.NewButton("Cancel", z.cancel)
+	cancel := widget.NewButton(i18n.T("btn.cancel"), z.cancel)
 	var left fyne.CanvasObject = cancel
 	if onBack != nil {
-		left = container.NewHBox(widget.NewButton("Back", onBack), cancel)
+		left = container.NewHBox(widget.NewButton(i18n.T("btn.back"), onBack), cancel)
 	}
 	next := widget.NewButton(nextLabel, onNext)
 	next.Importance = widget.HighImportance
@@ -71,13 +72,15 @@ func (z *Wizard) render(title string, body fyne.CanvasObject, onBack, onNext fun
 	var topObj fyne.CanvasObject = header
 	switch {
 	case z.insecure:
-		warn := widget.NewLabelWithStyle("⚠ certificate not verified", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+		warn := widget.NewLabelWithStyle(i18n.T("trust.notVerified"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 		topObj = container.NewVBox(warn, header)
 	case z.pinnedCert != "":
-		note := widget.NewLabelWithStyle("self-signed (trusted on this device)", fyne.TextAlignLeading, fyne.TextStyle{})
+		note := widget.NewLabelWithStyle(i18n.T("trust.selfSignedNote"), fyne.TextAlignLeading, fyne.TextStyle{})
 		topObj = container.NewVBox(note, header)
 	}
-	z.win.SetContent(container.NewBorder(topObj, bar, nil, nil, container.NewVBox(body)))
+	// The language selector sits at the very top of every wizard step (FR-003).
+	top := container.NewVBox(newLanguageSelect(z.win), topObj)
+	z.win.SetContent(container.NewBorder(top, bar, nil, nil, container.NewVBox(body)))
 	z.win.Canvas().SetOnTypedKey(func(e *fyne.KeyEvent) {
 		switch e.Name {
 		case fyne.KeyEscape:
@@ -102,34 +105,37 @@ func (z *Wizard) stepServer() {
 	url.SetPlaceHolder("https://vpn.example.com")
 	url.SetText(z.serverURL)
 	errLbl := widget.NewLabel("")
-	body := container.NewVBox(widget.NewLabel("Enter your lanweave server address."), url, errLbl)
+	body := container.NewVBox(widget.NewLabel(i18n.T("wizard.serverPrompt")), url, errLbl)
 
-	z.render("Server", body, nil, func() {
+	z.render(i18n.T("wizard.serverTitle"), body, nil, func() {
 		if url.Text == "" {
-			errLbl.SetText("Please enter the server address.")
+			errLbl.SetText(i18n.T("wizard.serverRequired"))
 			return
 		}
 		z.serverURL = url.Text
 		z.stepAuth()
-	}, "Next", url)
+	}, i18n.T("btn.next"), url)
 }
 
 func (z *Wizard) stepAuth() {
 	user := widget.NewEntry()
-	user.SetPlaceHolder("username")
+	user.SetPlaceHolder(i18n.T("wizard.usernamePlaceholder"))
 	user.SetText(z.username)
 	pass := widget.NewPasswordEntry()
-	pass.SetPlaceHolder("password")
+	pass.SetPlaceHolder(i18n.T("wizard.passwordPlaceholder"))
 
 	invite := widget.NewEntry()
-	invite.SetPlaceHolder("invite code")
-	inviteRow := container.NewVBox(widget.NewLabel("Invite code"), invite)
+	invite.SetPlaceHolder(i18n.T("wizard.invitePlaceholder"))
+	inviteRow := container.NewVBox(widget.NewLabel(i18n.T("wizard.inviteLabel")), invite)
 	if z.mode == onboard.SignIn {
 		inviteRow.Hide()
 	}
 
-	mode := widget.NewRadioGroup([]string{"Sign in", "Create account"}, func(s string) {
-		if s == "Create account" {
+	// The radio options are localized for display; selection is compared against the same
+	// localized strings, so the labels never have to match an English literal.
+	signInLabel, createLabel := i18n.T("wizard.signIn"), i18n.T("wizard.createAccount")
+	mode := widget.NewRadioGroup([]string{signInLabel, createLabel}, func(s string) {
+		if s == createLabel {
 			z.mode = onboard.CreateAccount
 			inviteRow.Show()
 		} else {
@@ -138,50 +144,50 @@ func (z *Wizard) stepAuth() {
 		}
 	})
 	if z.mode == onboard.CreateAccount {
-		mode.SetSelected("Create account")
+		mode.SetSelected(createLabel)
 	} else {
-		mode.SetSelected("Sign in")
+		mode.SetSelected(signInLabel)
 	}
 
 	errLbl := widget.NewLabel("")
-	body := container.NewVBox(mode, inviteRow, widget.NewLabel("Username"), user, widget.NewLabel("Password"), pass, errLbl)
+	body := container.NewVBox(mode, inviteRow, widget.NewLabel(i18n.T("wizard.usernameLabel")), user, widget.NewLabel(i18n.T("wizard.passwordLabel")), pass, errLbl)
 
-	z.render("Account", body, z.stepServer, func() {
+	z.render(i18n.T("wizard.accountTitle"), body, z.stepServer, func() {
 		if user.Text == "" || pass.Text == "" {
-			errLbl.SetText("Username and password are required.")
+			errLbl.SetText(i18n.T("wizard.credsRequired"))
 			return
 		}
 		if z.mode == onboard.CreateAccount && invite.Text == "" {
-			errLbl.SetText("An invite code is required to create an account.")
+			errLbl.SetText(i18n.T("wizard.inviteRequired"))
 			return
 		}
 		z.username, z.password, z.invite = user.Text, pass.Text, invite.Text
 		z.stepName()
-	}, "Next", user)
+	}, i18n.T("btn.next"), user)
 }
 
 func (z *Wizard) stepName() {
 	name := widget.NewEntry()
-	name.SetPlaceHolder("e.g. my-laptop")
+	name.SetPlaceHolder(i18n.T("wizard.devicePlaceholder"))
 	name.SetText(z.nodeName)
 	errLbl := widget.NewLabel("")
-	body := container.NewVBox(widget.NewLabel("Name this device."), name, errLbl)
+	body := container.NewVBox(widget.NewLabel(i18n.T("wizard.devicePrompt")), name, errLbl)
 
-	z.render("Device name", body, z.stepAuth, func() {
+	z.render(i18n.T("wizard.deviceTitle"), body, z.stepAuth, func() {
 		if name.Text == "" {
-			errLbl.SetText("Please name this device.")
+			errLbl.SetText(i18n.T("wizard.deviceRequired"))
 			return
 		}
 		z.nodeName = name.Text
 		z.runProvision()
-	}, "Finish", name)
+	}, i18n.T("btn.finish"), name)
 }
 
 // runProvision performs the network setup with a progress indicator and routes back to the
 // relevant step on a recoverable error.
 func (z *Wizard) runProvision() {
 	z.win.SetContent(container.NewVBox(
-		widget.NewLabel("Setting up this device…"),
+		widget.NewLabel(i18n.T("wizard.settingUp")),
 		widget.NewProgressBarInfinite(),
 	))
 
@@ -242,20 +248,12 @@ func (z *Wizard) offerTrust(ce *apiclient.CertError) {
 		z.runProvision()
 	}
 	if ce.Changed {
-		dialog.ShowConfirm("⚠ Server certificate CHANGED",
-			"The certificate presented by "+z.serverURL+" is DIFFERENT from the one you trusted "+
-				"before. This can mean the server was reinstalled — or that someone is intercepting "+
-				"your connection.\n\nNew fingerprint (SHA-256):\n"+fp+
-				"\n\nTrust this new certificate and replace the saved one?",
-			accept, z.win)
+		dialog.ShowConfirm(i18n.T("trust.changedTitle"),
+			i18n.T("trust.changedBody", z.serverURL, fp), accept, z.win)
 		return
 	}
-	dialog.ShowConfirm("Trust this server?",
-		"The certificate for "+z.serverURL+" is self-signed and can't be checked against a public "+
-			"authority. Verify the fingerprint with your administrator before trusting it.\n\n"+
-			"Fingerprint (SHA-256):\n"+fp+
-			"\n\nTrust this certificate on this device?",
-		accept, z.win)
+	dialog.ShowConfirm(i18n.T("trust.firstTitle"),
+		i18n.T("trust.firstBody", z.serverURL, fp), accept, z.win)
 }
 
 // fingerprintDisplay groups a lowercase hex fingerprint into colon-separated byte pairs so it can
@@ -309,20 +307,20 @@ func (z *Wizard) cancel() {
 func friendly(err error) string {
 	switch {
 	case errors.Is(err, apiclient.ErrAuthFailed):
-		return "Sign-in failed — check your username and password."
+		return i18n.T("wizard.errAuthFailed")
 	case errors.Is(err, apiclient.ErrInviteInvalid):
-		return "That invite code is invalid or has already been used."
+		return i18n.T("wizard.errInviteInvalid")
 	case errors.Is(err, apiclient.ErrUsernameTaken):
-		return "That username is already taken."
+		return i18n.T("wizard.errUsernameTaken")
 	case errors.Is(err, apiclient.ErrNodeNameTaken):
-		return "You already have a device with that name — please choose another."
+		return i18n.T("wizard.errNodeNameTaken")
 	case errors.Is(err, apiclient.ErrUnreachable):
-		return "Can't reach the server — check the address and your network connection."
+		return i18n.T("wizard.errUnreachable")
 	case errors.Is(err, apiclient.ErrUntrustedCert):
-		return "The server's certificate isn't trusted. Ask your administrator to install the root certificate."
+		return i18n.T("wizard.errUntrustedCert")
 	case errors.Is(err, apiclient.ErrPoolExhausted):
-		return "The server has no free addresses available right now."
+		return i18n.T("wizard.errPoolExhausted")
 	default:
-		return "Something went wrong during setup. Please try again."
+		return i18n.T("wizard.errGeneric")
 	}
 }
