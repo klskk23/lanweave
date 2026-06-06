@@ -51,6 +51,9 @@ type Provisioner struct {
 	StatePath string
 	ServerURL string // recorded in the state file
 	KeyName   string // defaults to keyring.DeviceKeyName
+	// PinnedCertSHA256 is the TOFU certificate fingerprint the user trusted during onboarding
+	// (empty when the server verified against a system CA); it is recorded in the state file.
+	PinnedCertSHA256 string
 }
 
 func (p *Provisioner) keyName() string {
@@ -104,12 +107,13 @@ func (p *Provisioner) Provision(c Credentials, nodeName string) (state.Record, e
 	}
 
 	rec := state.Record{
-		ServerURL:       p.ServerURL,
-		NodeName:        nodeName,
-		IP:              ip,
-		ServerPublicKey: info.PublicKey,
-		Endpoint:        info.Endpoint,
-		Network:         info.Network,
+		ServerURL:        p.ServerURL,
+		NodeName:         nodeName,
+		IP:               ip,
+		ServerPublicKey:  info.PublicKey,
+		Endpoint:         info.Endpoint,
+		Network:          info.Network,
+		PinnedCertSHA256: p.PinnedCertSHA256,
 	}
 	if err := state.Save(p.StatePath, rec); err != nil {
 		return state.Record{}, fmt.Errorf("save state: %w", err)

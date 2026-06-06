@@ -5,8 +5,10 @@ package apiclient
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ import (
 var (
 	ErrUnreachable   = errors.New("server unreachable")
 	ErrUntrustedCert = errors.New("server certificate not trusted")
+	ErrCertChanged   = errors.New("server certificate changed")
 	ErrAuthFailed    = errors.New("sign-in failed")
 	ErrInviteInvalid = errors.New("invite code invalid or already used")
 	ErrUsernameTaken = errors.New("username already taken")
@@ -40,11 +43,36 @@ var (
 	ErrZoneNotFound   = errors.New("zone not found")
 )
 
+// CertError reports a TLS certificate that neither matched the configured pin nor verified
+// against the configured roots. It carries the presented leaf certificate's fingerprint (for
+// a trust prompt) and whether a pin was configured (Changed=true means a previously trusted
+// certificate was replaced by an unrecognized one, vs a first-time untrusted certificate).
+type CertError struct {
+	Fingerprint string // lowercase-hex SHA-256 of the presented leaf certificate
+	Changed     bool
+}
+
+func (e *CertError) Error() string {
+	if e.Changed {
+		return "server certificate changed (fingerprint " + e.Fingerprint + ")"
+	}
+	return "server certificate not trusted (fingerprint " + e.Fingerprint + ")"
+}
+
+// Is lets callers match a *CertError with errors.Is against the sentinel that fits its kind:
+// a changed certificate matches ErrCertChanged, a first-time untrusted one ErrUntrustedCert.
+func (e *CertError) Is(target error) bool {
+	if e.Changed {
+		return target == ErrCertChanged
+	}
+	return target == ErrUntrustedCert
+}
+
 // Option configures a Client.
 type Option func(*Client)
 
 // WithInsecure disables TLS certificate verification (advanced/troubleshooting only;
-// never exposed in the UI). Mutually exclusive with WithRootCAs.
+// never exposed in the UI). Mutually exclusive with WithRootCAs / WithPinnedCert.
 func WithInsecure() Option { return func(c *Client) { c.insecure = true } }
 
 // WithRootCAs trusts a specific certificate pool in addition to nothing else, so the
@@ -52,13 +80,25 @@ func WithInsecure() Option { return func(c *Client) { c.insecure = true } }
 // disabling verification. Mutually exclusive with WithInsecure.
 func WithRootCAs(pool *x509.CertPool) Option { return func(c *Client) { c.rootCAs = pool } }
 
+// WithPinnedCert trusts the server certificate whose leaf SHA-256 fingerprint (lowercase hex)
+// equals fp, in addition to the system roots (TOFU). Verification passes if the presented
+// leaf matches the pin OR chains to a trusted root. Mutually exclusive with WithInsecure.
+func WithPinnedCert(fp string) Option { return func(c *Client) { c.pinnedCert = fp } }
+
+// certFingerprint is the lowercase-hex SHA-256 of a certificate's DER bytes.
+func certFingerprint(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(sum[:])
+}
+
 // Client talks to one lanweave server.
 type Client struct {
-	baseURL  string
-	http     *http.Client
-	token    string
-	insecure bool
-	rootCAs  *x509.CertPool
+	baseURL    string
+	http       *http.Client
+	token      string
+	insecure   bool
+	rootCAs    *x509.CertPool
+	pinnedCert string
 }
 
 // New builds a Client for the given base URL (e.g. "https://vpn.example.com").
@@ -68,17 +108,46 @@ func New(baseURL string, opts ...Option) *Client {
 		o(c)
 	}
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	switch {
-	case c.insecure:
+	if c.insecure {
 		tlsCfg.InsecureSkipVerify = true //nolint:gosec // advanced --insecure flag only
-	case c.rootCAs != nil:
-		tlsCfg.RootCAs = c.rootCAs
+	} else {
+		// Take over verification so a pinned certificate (TOFU) is accepted alongside the
+		// system/configured roots, and so the leaf fingerprint is captured on failure for the
+		// trust prompt. InsecureSkipVerify only disables Go's *default* check; VerifyConnection
+		// below is the sole authority.
+		host := serverName(c.baseURL)
+		pin, roots := c.pinnedCert, c.rootCAs
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec // replaced by VerifyConnection
+		tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+			leaf := cs.PeerCertificates[0]
+			fp := certFingerprint(leaf)
+			if pin != "" && fp == pin {
+				return nil
+			}
+			inter := x509.NewCertPool()
+			for _, ic := range cs.PeerCertificates[1:] {
+				inter.AddCert(ic)
+			}
+			if _, err := leaf.Verify(x509.VerifyOptions{DNSName: host, Roots: roots, Intermediates: inter}); err == nil {
+				return nil
+			}
+			return &CertError{Fingerprint: fp, Changed: pin != ""}
+		}
 	}
 	c.http = &http.Client{
 		Timeout:   15 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: tlsCfg},
 	}
 	return c
+}
+
+// serverName extracts the host (no port) from a base URL for certificate hostname
+// verification, so an IP-literal or named server is checked against the right SANs.
+func serverName(baseURL string) string {
+	if u, err := url.Parse(baseURL); err == nil {
+		return u.Hostname()
+	}
+	return ""
 }
 
 // Token returns the current session token (set by Login).
@@ -223,20 +292,17 @@ func (c *Client) do(method, path string, auth bool, body, out any) (int, error) 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
+		// Our VerifyConnection surfaces a *CertError (first-trust or changed) carrying the
+		// leaf fingerprint; return it so the UI can prompt and pin.
+		var ce *CertError
+		if errors.As(err, &ce) {
+			return 0, ce
+		}
+		// Fallback for any standard verification error not routed through VerifyConnection.
 		var certErr x509.UnknownAuthorityError
 		var hostErr x509.HostnameError
 		if errors.As(err, &certErr) || errors.As(err, &hostErr) {
 			return 0, ErrUntrustedCert
-		}
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			if inner := urlErr.Unwrap(); inner != nil {
-				var ce x509.UnknownAuthorityError
-				var he x509.HostnameError
-				if errors.As(inner, &ce) || errors.As(inner, &he) {
-					return 0, ErrUntrustedCert
-				}
-			}
 		}
 		return 0, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}

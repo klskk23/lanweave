@@ -13,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"lanweave/internal/client/apiclient"
+	"lanweave/internal/client/firewall"
 	"lanweave/internal/client/panel"
 	"lanweave/internal/client/state"
 	"lanweave/internal/client/tunnel"
@@ -32,7 +33,8 @@ type Panel struct {
 	status      *widget.Label
 	connBtn     *widget.Button
 	discBtn     *widget.Button
-	insecureLbl *widget.Label
+	insecureLbl *widget.Label // red banner: --insecure CLI flag (no verification)
+	pinnedLbl   *widget.Label // neutral note: a self-signed cert is trusted (TOFU pin)
 	nodesBox    *fyne.Container
 	zonesBox    *fyne.Container
 }
@@ -45,6 +47,7 @@ func NewPanel(win fyne.Window, rec state.Record, tn *tunnel.Tunnel, ctrl *panel.
 		win: win, rec: rec, tn: tn, ctrl: ctrl, restart: restart,
 		status:      widget.NewLabel("Status: disconnected"),
 		insecureLbl: widget.NewLabelWithStyle("⚠ certificate not verified", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		pinnedLbl:   widget.NewLabelWithStyle("self-signed (trusted on this device)", fyne.TextAlignLeading, fyne.TextStyle{}),
 		nodesBox:    container.NewVBox(),
 		zonesBox:    container.NewVBox(),
 	}
@@ -74,26 +77,51 @@ func (p *Panel) build() fyne.CanvasObject {
 		container.NewTabItem("My zones", container.NewVScroll(zonesTab)),
 	)
 
+	// Firewall toggle (feature 018): opting in installs a host inbound-allow rule while connected,
+	// letting same-subnet VPN peers reach this device. It is OFF by default and persisted; a
+	// permanent inline warning states the exposure (no confirm dialog — enabling it is reversible
+	// and user-initiated). The handler persists the preference and reconciles the rule against the
+	// current connection state (FR-012/014).
+	fwCheck := widget.NewCheck("Allow inbound from VPN peers ("+firewall.VPNSubnet+")", nil)
+	fwCheck.SetChecked(p.ctrl.FirewallAllowed())
+	fwCheck.OnChanged = func(on bool) {
+		if err := p.ctrl.SetFirewallAllowed(on, p.tn.State() == tunnel.Connected); err != nil {
+			dialog.ShowError(errors.New(panelMessage(err)), p.win)
+		}
+	}
+	fwWarn := widget.NewLabelWithStyle("Enabling this lets any peer on the VPN subnet reach every "+
+		"service on this device.", fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+
 	// Log out sits in a footer, deliberately away from the Connect/zone primary controls so
-	// it isn't triggered by accident (FR-001). The footer also hosts the persistent
-	// "certificate not verified" indicator (FR-013).
+	// it isn't triggered by accident (FR-001). The footer also hosts the persistent trust
+	// indicator: a red "certificate not verified" banner under --insecure, or a neutral
+	// "trusted on this device" note when a self-signed certificate is pinned (FR-008/009).
 	logoutBtn := widget.NewButton("Log out", p.confirmLogout)
 	logoutBtn.Importance = widget.LowImportance
 	bottom := container.NewVBox(
 		widget.NewSeparator(),
-		container.NewBorder(nil, nil, p.insecureLbl, logoutBtn),
+		fwCheck,
+		fwWarn,
+		container.NewBorder(nil, nil, container.NewHBox(p.insecureLbl, p.pinnedLbl), logoutBtn),
 	)
-	p.refreshInsecure()
+	p.refreshTrust()
 	return container.NewBorder(top, bottom, nil, nil, tabs)
 }
 
-// refreshInsecure shows the persistent "certificate not verified" indicator whenever the
-// session is bypassing TLS verification (the --insecure CLI flag or an accepted opt-in).
-func (p *Panel) refreshInsecure() {
-	if p.ctrl.Insecure() {
+// refreshTrust shows the persistent trust indicator: the red "certificate not verified" banner
+// while the session bypasses verification (--insecure), otherwise a neutral "trusted on this
+// device" note when a self-signed certificate has been pinned (TOFU). Only one is ever visible.
+func (p *Panel) refreshTrust() {
+	switch {
+	case p.ctrl.Insecure():
 		p.insecureLbl.Show()
-	} else {
+		p.pinnedLbl.Hide()
+	case p.rec.PinnedCertSHA256 != "":
 		p.insecureLbl.Hide()
+		p.pinnedLbl.Show()
+	default:
+		p.insecureLbl.Hide()
+		p.pinnedLbl.Hide()
 	}
 }
 
@@ -129,29 +157,50 @@ func (p *Panel) confirmLogout() {
 	}, p.win)
 }
 
-// offerInsecure shows the reactive certificate opt-in (FR-009/010). On accept it rebuilds the
-// controller's API client with verification disabled (re-applying the cached session), shows
-// the persistent indicator, and runs onAccept (typically a retry of the failed operation).
-func (p *Panel) offerInsecure(onAccept func()) {
-	dialog.ShowConfirm("Certificate not verified",
-		"The server's certificate could not be verified.\n\nContinue anyway (insecure)? This applies "+
-			"only to the current session and is not remembered.",
-		func(ok bool) {
-			if !ok {
-				return
-			}
-			p.ctrl.UseInsecureClient(apiclient.New(p.rec.ServerURL, apiclient.WithInsecure()))
-			p.refreshInsecure()
-			onAccept()
-		}, p.win)
+// offerTrust handles a TOFU verification failure surfaced during a running session. A first-trust
+// prompt names the server and shows the leaf fingerprint; a changed certificate gets a visibly
+// heavier warning. On accept it persists the pin, rebuilds the controller's API client to trust it
+// (re-applying the cached session token), updates the trust indicator, and runs onAccept (typically
+// a retry of the failed operation). (FR-002/004/005)
+func (p *Panel) offerTrust(ce *apiclient.CertError, onAccept func()) {
+	fp := fingerprintDisplay(ce.Fingerprint)
+	accept := func(ok bool) {
+		if !ok {
+			return
+		}
+		if err := p.ctrl.SetPinnedCert(ce.Fingerprint); err != nil {
+			dialog.ShowError(errors.New(panelMessage(err)), p.win)
+			return
+		}
+		p.rec.PinnedCertSHA256 = ce.Fingerprint
+		p.ctrl.UseClient(apiclient.New(p.rec.ServerURL, apiclient.WithPinnedCert(ce.Fingerprint)))
+		p.refreshTrust()
+		onAccept()
+	}
+	if ce.Changed {
+		dialog.ShowConfirm("⚠ Server certificate CHANGED",
+			"The certificate presented by "+p.rec.ServerURL+" is DIFFERENT from the one you trusted "+
+				"before. This can mean the server was reinstalled — or that someone is intercepting "+
+				"your connection.\n\nNew fingerprint (SHA-256):\n"+fp+
+				"\n\nTrust this new certificate and replace the saved one?",
+			accept, p.win)
+		return
+	}
+	dialog.ShowConfirm("Trust this server?",
+		"The certificate for "+p.rec.ServerURL+" is self-signed and can't be checked against a public "+
+			"authority. Verify the fingerprint with your administrator before trusting it.\n\n"+
+			"Fingerprint (SHA-256):\n"+fp+
+			"\n\nTrust this certificate on this device?",
+		accept, p.win)
 }
 
 // start validates the session (prompting sign-in if needed), then refreshes and polls.
 func (p *Panel) start() {
 	need, err := p.ctrl.LoadSession()
 	if err != nil {
-		if errors.Is(err, apiclient.ErrUntrustedCert) {
-			fyne.Do(func() { p.offerInsecure(func() { go p.start() }) })
+		var ce *apiclient.CertError
+		if errors.As(err, &ce) {
+			fyne.Do(func() { p.offerTrust(ce, func() { go p.start() }) })
 			return
 		}
 		fyne.Do(func() { dialog.ShowError(errors.New(panelMessage(err)), p.win) })
@@ -338,8 +387,9 @@ func (p *Panel) run(msg string, op func() error) {
 		fyne.Do(func() {
 			prog.Hide()
 			if err != nil {
-				if errors.Is(err, apiclient.ErrUntrustedCert) {
-					p.offerInsecure(func() { p.run(msg, op) })
+				var ce *apiclient.CertError
+				if errors.As(err, &ce) {
+					p.offerTrust(ce, func() { p.run(msg, op) })
 					return
 				}
 				dialog.ShowError(errors.New(panelMessage(err)), p.win)
@@ -355,6 +405,10 @@ func (p *Panel) onConnect() {
 	p.status.SetText("Status: connecting…")
 	go func() {
 		err := p.tn.Connect()
+		if err == nil {
+			// Now connected: install the host rule iff the user has opted in (best-effort).
+			_ = p.ctrl.ReconcileFirewall(true)
+		}
 		fyne.Do(func() {
 			if err != nil {
 				dialog.ShowError(errors.New(tunnelMessage(err)), p.win)
@@ -366,6 +420,7 @@ func (p *Panel) onConnect() {
 
 func (p *Panel) onDisconnect() {
 	_ = p.tn.Disconnect()
+	_ = p.ctrl.ReconcileFirewall(false) // no tunnel → never leave the host rule open
 	p.refreshConnection()
 }
 

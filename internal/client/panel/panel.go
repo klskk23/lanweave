@@ -8,6 +8,7 @@ import (
 	"errors"
 
 	"lanweave/internal/client/apiclient"
+	"lanweave/internal/client/firewall"
 	"lanweave/internal/client/keyring"
 	"lanweave/internal/client/state"
 	"lanweave/pkg/protocol"
@@ -66,14 +67,15 @@ type Controller struct {
 	keys      keyring.Store
 	statePath string
 	insecure  bool
+	fw        firewall.Control
 }
 
 // New builds a controller bound to an API client, the setup record (to identify this
 // machine), and the secure store (for the cached session token). statePath lets Logout
 // clear the local state file; insecure seeds the "certificate not verified" indicator for
-// the --insecure CLI-flag case.
-func New(a api, record state.Record, keys keyring.Store, statePath string, insecure bool) *Controller {
-	return &Controller{api: a, record: record, keys: keys, statePath: statePath, insecure: insecure}
+// the --insecure CLI-flag case; fw installs/removes the optional host inbound-allow rule.
+func New(a api, record state.Record, keys keyring.Store, statePath string, insecure bool, fw firewall.Control) *Controller {
+	return &Controller{api: a, record: record, keys: keys, statePath: statePath, insecure: insecure, fw: fw}
 }
 
 // Insecure reports whether this session is bypassing TLS certificate verification (set from
@@ -200,6 +202,8 @@ func (c *Controller) DeleteZone(name string) error {
 // absent); err is non-nil only when a local clear failed.
 func (c *Controller) Logout() (remoteRemoved bool, err error) {
 	remoteRemoved = c.removeRemoteNode()
+	// Close the host rule before clearing state so logout never strands an open firewall.
+	_ = c.fw.Clear()
 	localErr := errors.Join(
 		c.keys.Delete(keyring.SessionTokenName),
 		c.keys.Delete(keyring.DeviceKeyName),
@@ -224,16 +228,53 @@ func (c *Controller) removeRemoteNode() bool {
 	return true
 }
 
-// UseInsecureClient swaps in a freshly built API client that bypasses TLS verification (the
-// caller constructs it with apiclient.WithInsecure after the user accepts the reactive
-// opt-in), flips the insecure indicator, and re-applies the cached session token so the
-// signed-in session survives the swap.
-func (c *Controller) UseInsecureClient(a api) {
+// UseClient swaps in a freshly built API client (e.g. rebuilt with apiclient.WithPinnedCert
+// after the user trusts or re-trusts a certificate) and re-applies the cached session token
+// so the signed-in session survives the swap. It does NOT change the insecure indicator —
+// trusting a pinned certificate is a verified connection, not an insecure one.
+func (c *Controller) UseClient(a api) {
 	if tok, gerr := c.keys.Get(keyring.SessionTokenName); gerr == nil && len(tok) > 0 {
 		a.SetToken(string(tok))
 	}
 	c.api = a
-	c.insecure = true
+}
+
+// SetPinnedCert records a trusted server leaf-certificate fingerprint (TOFU) in the local
+// state file, so a certificate trusted or re-trusted during a running session is remembered
+// for future connections. Overwrites any previous pin for this server.
+func (c *Controller) SetPinnedCert(fp string) error {
+	c.record.PinnedCertSHA256 = fp
+	return state.Save(c.statePath, c.record)
+}
+
+// FirewallAllowed reports the persisted user preference for the host inbound-allow rule. It is the
+// preference alone — the rule is present only when this is true AND the tunnel is connected.
+func (c *Controller) FirewallAllowed() bool { return c.record.FirewallAllowVPN }
+
+// SetFirewallAllowed records the user's toggle choice and reconciles the host rule. The preference
+// is persisted regardless of connection state (so it survives restarts), but the rule itself is
+// installed only when the toggle is on AND the tunnel is connected; otherwise it is removed.
+func (c *Controller) SetFirewallAllowed(on, connected bool) error {
+	c.record.FirewallAllowVPN = on
+	if err := state.Save(c.statePath, c.record); err != nil {
+		return err
+	}
+	return c.applyFirewall(on && connected)
+}
+
+// ReconcileFirewall installs or removes the host rule to match (preference ON ∧ connected),
+// called on connect/disconnect so the rule tracks the tunnel without changing the preference.
+func (c *Controller) ReconcileFirewall(connected bool) error {
+	return c.applyFirewall(c.record.FirewallAllowVPN && connected)
+}
+
+// applyFirewall opens or closes the host rule. Allow is idempotent (delete-then-add), so calling
+// it while already open is safe.
+func (c *Controller) applyFirewall(open bool) error {
+	if open {
+		return c.fw.Allow()
+	}
+	return c.fw.Clear()
 }
 
 func (c *Controller) isThisMachine(name, ip string) bool {

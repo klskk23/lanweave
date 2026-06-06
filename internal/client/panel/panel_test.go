@@ -6,11 +6,26 @@ import (
 	"testing"
 
 	"lanweave/internal/client/apiclient"
+	"lanweave/internal/client/firewall"
 	"lanweave/internal/client/keyring"
 	"lanweave/internal/client/panel"
 	"lanweave/internal/client/state"
 	"lanweave/pkg/protocol"
 )
+
+// fakeFirewall is an inspectable stand-in for firewall.Control. open models the rule's presence
+// (a bool, so two Allow()s can't create a duplicate "open" state — proving idempotency); the
+// counters let tests assert exactly one of Allow/Clear fired per decision.
+type fakeFirewall struct {
+	open       bool
+	allowCalls int
+	clearCalls int
+}
+
+func (f *fakeFirewall) Allow() error { f.open = true; f.allowCalls++; return nil }
+func (f *fakeFirewall) Clear() error { f.open = false; f.clearCalls++; return nil }
+
+var _ firewall.Control = (*fakeFirewall)(nil)
 
 // fakeAPI is a programmable stand-in for the REST client (our own seam).
 type fakeAPI struct {
@@ -59,7 +74,7 @@ func newController(t *testing.T, f *fakeAPI) (*panel.Controller, *keyring.Fake) 
 	fk := keyring.NewFake()
 	rec := state.Record{NodeName: "laptop", IP: "100.127.0.2"}
 	statePath := filepath.Join(t.TempDir(), "state.json")
-	return panel.New(f, rec, fk, statePath, false), fk
+	return panel.New(f, rec, fk, statePath, false, &fakeFirewall{}), fk
 }
 
 func TestDevicesMarksThisMachine(t *testing.T) {
@@ -197,7 +212,7 @@ func logoutFixture(t *testing.T, f *fakeAPI) (*panel.Controller, *keyring.Fake, 
 		t.Fatal(err)
 	}
 	rec := state.Record{NodeName: "laptop", IP: "100.127.0.2"}
-	return panel.New(f, rec, fk, statePath, false), fk, statePath
+	return panel.New(f, rec, fk, statePath, false, &fakeFirewall{}), fk, statePath
 }
 
 func assertLocalCleared(t *testing.T, fk *keyring.Fake, statePath string) {
@@ -267,21 +282,22 @@ func TestLogout(t *testing.T) {
 	assertLocalCleared(t, fk, sp)
 }
 
-// TestUseInsecureClient covers the reactive opt-in swap: calls route to the new client, the
-// insecure indicator flips, and the cached session token is re-applied (FR-012/013).
-func TestUseInsecureClient(t *testing.T) {
+// TestUseClient covers the TOFU re-pin swap: calls route to the new client and the cached
+// session token is re-applied, WITHOUT flipping the insecure indicator (a pinned cert is a
+// verified connection, not an insecure one). Replaces 017's TestUseInsecureClient.
+func TestUseClient(t *testing.T) {
 	f1 := &fakeAPI{nodes: protocol.NodeListResponse{Nodes: []protocol.NodeResponse{{ID: 1, Name: "laptop", IP: "100.127.0.2"}}}}
 	fk := keyring.NewFake()
 	_ = fk.Set(keyring.SessionTokenName, []byte("cached-tok"))
-	c := panel.New(f1, state.Record{NodeName: "laptop", IP: "100.127.0.2"}, fk, filepath.Join(t.TempDir(), "state.json"), false)
+	c := panel.New(f1, state.Record{NodeName: "laptop", IP: "100.127.0.2"}, fk, filepath.Join(t.TempDir(), "state.json"), false, &fakeFirewall{})
 	if c.Insecure() {
 		t.Error("controller should start secure")
 	}
 
 	f2 := &fakeAPI{nodes: protocol.NodeListResponse{Nodes: []protocol.NodeResponse{{ID: 2, Name: "laptop", IP: "100.127.0.2"}}}}
-	c.UseInsecureClient(f2)
-	if !c.Insecure() {
-		t.Error("Insecure() should be true after UseInsecureClient")
+	c.UseClient(f2)
+	if c.Insecure() {
+		t.Error("UseClient must NOT set the insecure indicator (pinned cert is verified)")
 	}
 	if f2.tokenSetTo != "cached-tok" {
 		t.Errorf("cached token not re-applied to swapped client: got %q", f2.tokenSetTo)
@@ -292,5 +308,139 @@ func TestUseInsecureClient(t *testing.T) {
 	}
 	if f2.joinedNodeID != 2 || f1.joinedNodeID != 0 {
 		t.Errorf("calls not routed to swapped client: f2.joined=%d f1.joined=%d", f2.joinedNodeID, f1.joinedNodeID)
+	}
+}
+
+// TestSetPinnedCert covers persisting a TOFU pin to the local state file (FR-002/006).
+func TestSetPinnedCert(t *testing.T) {
+	fk := keyring.NewFake()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := state.Save(statePath, state.Record{ServerURL: "https://s", NodeName: "laptop", IP: "100.127.0.2"}); err != nil {
+		t.Fatal(err)
+	}
+	c := panel.New(&fakeAPI{}, state.Record{ServerURL: "https://s", NodeName: "laptop", IP: "100.127.0.2"}, fk, statePath, false, &fakeFirewall{})
+	if err := c.SetPinnedCert("abc123"); err != nil {
+		t.Fatalf("set pin: %v", err)
+	}
+	got, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got.PinnedCertSHA256 != "abc123" {
+		t.Errorf("persisted pin = %q, want abc123", got.PinnedCertSHA256)
+	}
+}
+
+// firewallController wires a controller with a real state file (so the persisted preference is
+// observable) and an inspectable fake firewall, seeded with the given FirewallAllowVPN preference.
+func firewallController(t *testing.T, pref bool) (*panel.Controller, *fakeFirewall, string) {
+	t.Helper()
+	fk := keyring.NewFake()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	rec := state.Record{ServerURL: "https://s", NodeName: "laptop", IP: "100.127.0.2", FirewallAllowVPN: pref}
+	if err := state.Save(statePath, rec); err != nil {
+		t.Fatal(err)
+	}
+	fw := &fakeFirewall{}
+	return panel.New(&fakeAPI{}, rec, fk, statePath, false, fw), fw, statePath
+}
+
+// TestFirewallReconcileTruthTable asserts the core rule: the host rule exists iff
+// (preference ON ∧ tunnel connected); every other cell removes it (FR-013/015/016).
+func TestFirewallReconcileTruthTable(t *testing.T) {
+	cases := []struct {
+		pref, connected, wantOpen bool
+	}{
+		{false, false, false},
+		{false, true, false},
+		{true, false, false},
+		{true, true, true},
+	}
+	for _, tc := range cases {
+		c, fw, _ := firewallController(t, tc.pref)
+		if err := c.ReconcileFirewall(tc.connected); err != nil {
+			t.Fatalf("pref=%v connected=%v: %v", tc.pref, tc.connected, err)
+		}
+		if fw.open != tc.wantOpen {
+			t.Errorf("pref=%v connected=%v: open=%v want %v", tc.pref, tc.connected, fw.open, tc.wantOpen)
+		}
+		if tc.wantOpen {
+			if fw.allowCalls != 1 || fw.clearCalls != 0 {
+				t.Errorf("pref=%v connected=%v: want exactly one Allow, got allow=%d clear=%d", tc.pref, tc.connected, fw.allowCalls, fw.clearCalls)
+			}
+		} else {
+			if fw.clearCalls != 1 || fw.allowCalls != 0 {
+				t.Errorf("pref=%v connected=%v: want exactly one Clear, got allow=%d clear=%d", tc.pref, tc.connected, fw.allowCalls, fw.clearCalls)
+			}
+		}
+	}
+}
+
+// TestSetFirewallAllowedPersistsAndApplies covers the toggle handler: the preference is persisted
+// regardless of connection state, but the rule is installed only when also connected (FR-012/014).
+func TestSetFirewallAllowedPersistsAndApplies(t *testing.T) {
+	// ON while connected → persisted true + Allow.
+	c, fw, sp := firewallController(t, false)
+	if err := c.SetFirewallAllowed(true, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := state.Load(sp); !got.FirewallAllowVPN {
+		t.Error("FirewallAllowVPN not persisted true")
+	}
+	if !c.FirewallAllowed() {
+		t.Error("FirewallAllowed() should report true")
+	}
+	if !fw.open || fw.allowCalls != 1 {
+		t.Errorf("on ∧ connected: want Allow, got open=%v allow=%d", fw.open, fw.allowCalls)
+	}
+
+	// ON while disconnected → preference persists true, but rule stays closed (only when connected).
+	c, fw, sp = firewallController(t, false)
+	if err := c.SetFirewallAllowed(true, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := state.Load(sp); !got.FirewallAllowVPN {
+		t.Error("preference should persist true even while disconnected")
+	}
+	if fw.open || fw.clearCalls != 1 {
+		t.Errorf("on ∧ disconnected: want Clear, got open=%v clear=%d", fw.open, fw.clearCalls)
+	}
+
+	// OFF while connected → persisted false + Clear.
+	c, fw, sp = firewallController(t, true)
+	if err := c.SetFirewallAllowed(false, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := state.Load(sp); got.FirewallAllowVPN {
+		t.Error("FirewallAllowVPN not persisted false")
+	}
+	if fw.open || fw.clearCalls != 1 {
+		t.Errorf("toggled off: want Clear, got open=%v clear=%d", fw.open, fw.clearCalls)
+	}
+}
+
+// TestLogoutClearsFirewall ensures logout never strands an open rule (FR-016).
+func TestLogoutClearsFirewall(t *testing.T) {
+	c, fw, _ := firewallController(t, true)
+	if _, err := c.Logout(); err != nil {
+		t.Fatal(err)
+	}
+	if fw.clearCalls < 1 {
+		t.Error("Logout should clear the firewall rule")
+	}
+}
+
+// TestFirewallAllowIdempotent shows repeated reconciles never produce a duplicate open state — the
+// real netsh path is delete-then-add, modelled here by the fake's boolean open (FR-017).
+func TestFirewallAllowIdempotent(t *testing.T) {
+	c, fw, _ := firewallController(t, true)
+	if err := c.ReconcileFirewall(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileFirewall(true); err != nil {
+		t.Fatal(err)
+	}
+	if !fw.open || fw.allowCalls != 2 {
+		t.Errorf("two reconciles (on ∧ connected): open=%v allow=%d, want open + 2 Allow (no duplicate open)", fw.open, fw.allowCalls)
 	}
 }

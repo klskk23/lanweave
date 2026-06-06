@@ -4,6 +4,7 @@ package ui
 
 import (
 	"errors"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -11,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"lanweave/internal/client/apiclient"
+	"lanweave/internal/client/firewall"
 	"lanweave/internal/client/keyring"
 	"lanweave/internal/client/onboard"
 	"lanweave/internal/client/panel"
@@ -25,8 +27,12 @@ type Wizard struct {
 	win          fyne.Window
 	statePath    string
 	keys         keyring.Store
-	insecure     bool // live value; may be flipped true by the reactive cert opt-in
+	insecure     bool // the --insecure CLI value; bypasses verification entirely
 	origInsecure bool // the original --insecure CLI value; used to seed a post-logout restart
+
+	// pinnedCert is the TOFU leaf-certificate fingerprint the user trusted for this server in
+	// the current wizard run; threaded into the API client and persisted with the state record.
+	pinnedCert string
 
 	serverURL string
 	mode      onboard.AuthMode
@@ -59,13 +65,17 @@ func (z *Wizard) render(title string, body fyne.CanvasObject, onBack, onNext fun
 	next.Importance = widget.HighImportance
 	bar := container.NewBorder(nil, nil, left, next)
 
-	// Persistent "certificate not verified" indicator while this session bypasses TLS
-	// verification — whether via the --insecure CLI flag or an accepted reactive opt-in
-	// (FR-013/014).
+	// Persistent trust indicator: a severe "not verified" banner under --insecure (no
+	// verification at all), or a neutral "trusted on this device" note once a self-signed
+	// certificate has been pinned via TOFU (FR-008/009).
 	var topObj fyne.CanvasObject = header
-	if z.insecure {
+	switch {
+	case z.insecure:
 		warn := widget.NewLabelWithStyle("⚠ certificate not verified", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 		topObj = container.NewVBox(warn, header)
+	case z.pinnedCert != "":
+		note := widget.NewLabelWithStyle("self-signed (trusted on this device)", fyne.TextAlignLeading, fyne.TextStyle{})
+		topObj = container.NewVBox(note, header)
 	}
 	z.win.SetContent(container.NewBorder(topObj, bar, nil, nil, container.NewVBox(body)))
 	z.win.Canvas().SetOnTypedKey(func(e *fyne.KeyEvent) {
@@ -176,11 +186,15 @@ func (z *Wizard) runProvision() {
 	))
 
 	var opts []apiclient.Option
-	if z.insecure {
+	switch {
+	case z.insecure:
 		opts = append(opts, apiclient.WithInsecure())
+	case z.pinnedCert != "":
+		opts = append(opts, apiclient.WithPinnedCert(z.pinnedCert))
 	}
 	p := &onboard.Provisioner{
 		API: apiclient.New(z.serverURL, opts...), Keys: z.keys, StatePath: z.statePath, ServerURL: z.serverURL,
+		PinnedCertSHA256: z.pinnedCert,
 	}
 	creds := onboard.Credentials{Mode: z.mode, Invite: z.invite, Username: z.username, Password: z.password}
 
@@ -188,21 +202,13 @@ func (z *Wizard) runProvision() {
 		rec, err := p.Provision(creds, z.nodeName)
 		fyne.Do(func() {
 			if err != nil {
-				// Reactive insecure opt-in: only on a real verification failure, never a
-				// standing toggle (FR-009/010). Accept → rebuild the client insecure and retry;
-				// decline → no connection (FR-011). The !z.insecure guard avoids a retry loop.
-				if errors.Is(err, apiclient.ErrUntrustedCert) && !z.insecure {
-					dialog.ShowConfirm("Certificate not verified",
-						"The server's certificate could not be verified.\n\nContinue anyway (insecure)? "+
-							"This applies only to the current session and is not remembered.",
-						func(ok bool) {
-							if !ok {
-								z.stepServer()
-								return
-							}
-							z.insecure = true
-							z.runProvision()
-						}, z.win)
+				// Trust-on-first-use: a verification failure surfaces a *CertError carrying the
+				// leaf fingerprint. Prompt once (first-trust) or with a heavier warning (changed
+				// cert); accepting persists the pin and re-runs. Not reached under --insecure
+				// (verification is bypassed entirely). (FR-001..006)
+				var ce *apiclient.CertError
+				if errors.As(err, &ce) {
+					z.offerTrust(ce)
 					return
 				}
 				dialog.ShowError(errors.New(friendly(err)), z.win)
@@ -221,6 +227,54 @@ func (z *Wizard) runProvision() {
 	}()
 }
 
+// offerTrust handles a TOFU verification failure during onboarding. A first-trust prompt names
+// the server and shows the leaf fingerprint; a changed certificate gets a visibly heavier warning.
+// Accepting pins the presented fingerprint and re-runs provisioning; declining returns to the
+// server step. (FR-002/004/005)
+func (z *Wizard) offerTrust(ce *apiclient.CertError) {
+	fp := fingerprintDisplay(ce.Fingerprint)
+	accept := func(ok bool) {
+		if !ok {
+			z.stepServer()
+			return
+		}
+		z.pinnedCert = ce.Fingerprint
+		z.runProvision()
+	}
+	if ce.Changed {
+		dialog.ShowConfirm("⚠ Server certificate CHANGED",
+			"The certificate presented by "+z.serverURL+" is DIFFERENT from the one you trusted "+
+				"before. This can mean the server was reinstalled — or that someone is intercepting "+
+				"your connection.\n\nNew fingerprint (SHA-256):\n"+fp+
+				"\n\nTrust this new certificate and replace the saved one?",
+			accept, z.win)
+		return
+	}
+	dialog.ShowConfirm("Trust this server?",
+		"The certificate for "+z.serverURL+" is self-signed and can't be checked against a public "+
+			"authority. Verify the fingerprint with your administrator before trusting it.\n\n"+
+			"Fingerprint (SHA-256):\n"+fp+
+			"\n\nTrust this certificate on this device?",
+		accept, z.win)
+}
+
+// fingerprintDisplay groups a lowercase hex fingerprint into colon-separated byte pairs so it can
+// be read aloud and compared against the server's certificate.
+func fingerprintDisplay(fp string) string {
+	var b strings.Builder
+	for i := 0; i < len(fp); i += 2 {
+		if i > 0 {
+			b.WriteByte(':')
+		}
+		end := i + 2
+		if end > len(fp) {
+			end = len(fp)
+		}
+		b.WriteString(fp[i:end])
+	}
+	return b.String()
+}
+
 // showHome builds the tunnel + management controller from the freshly stored key + record
 // and shows the main panel.
 func (z *Wizard) showHome(rec state.Record) {
@@ -231,10 +285,13 @@ func (z *Wizard) showHome(rec state.Record) {
 		tn = tunnel.New(rec, "") // panel still renders; Connect will report ErrNoSetup
 	}
 	var opts []apiclient.Option
-	if z.insecure {
+	switch {
+	case z.insecure:
 		opts = append(opts, apiclient.WithInsecure())
+	case rec.PinnedCertSHA256 != "":
+		opts = append(opts, apiclient.WithPinnedCert(rec.PinnedCertSHA256))
 	}
-	ctrl := panel.New(apiclient.New(rec.ServerURL, opts...), rec, z.keys, z.statePath, z.insecure)
+	ctrl := panel.New(apiclient.New(rec.ServerURL, opts...), rec, z.keys, z.statePath, z.insecure, firewall.System())
 	z.win.SetContent(NewPanel(z.win, rec, tn, ctrl, func() {
 		NewWizard(z.win, z.statePath, z.keys, z.origInsecure).Start()
 	}))

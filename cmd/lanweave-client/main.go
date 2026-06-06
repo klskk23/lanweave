@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/app"
 
 	"lanweave/internal/client/apiclient"
+	"lanweave/internal/client/firewall"
 	"lanweave/internal/client/keyring"
 	"lanweave/internal/client/onboard"
 	"lanweave/internal/client/panel"
@@ -49,16 +50,25 @@ func main() {
 		log.Fatalf("open secure store: %v", err)
 	}
 
+	// Startup orphan sweep: a previous run that crashed while connected may have left the host
+	// inbound-allow rule installed. Remove any such rule before building the UI so the firewall
+	// only ever opens under an active, opted-in session (best-effort; absent rule is fine).
+	_ = firewall.Clear()
+
 	switch target, rec := onboard.StartupTarget(statePath); target {
 	case onboard.Home:
 		priv, _ := keys.Get(keyring.DeviceKeyName)
 		tn := tunnel.New(*rec, string(priv))
-		defer tn.Close() // tear the tunnel down cleanly on exit (no orphan adapter)
+		defer tn.Close()       // tear the tunnel down cleanly on exit (no orphan adapter)
+		defer firewall.Clear() // close the host rule on exit (no orphan firewall opening)
 		var opts []apiclient.Option
-		if *insecure {
+		switch {
+		case *insecure:
 			opts = append(opts, apiclient.WithInsecure())
+		case rec.PinnedCertSHA256 != "":
+			opts = append(opts, apiclient.WithPinnedCert(rec.PinnedCertSHA256))
 		}
-		ctrl := panel.New(apiclient.New(rec.ServerURL, opts...), *rec, keys, statePath, *insecure)
+		ctrl := panel.New(apiclient.New(rec.ServerURL, opts...), *rec, keys, statePath, *insecure, firewall.System())
 		w.SetContent(ui.NewPanel(w, *rec, tn, ctrl, func() {
 			ui.NewWizard(w, statePath, keys, *insecure).Start()
 		}))

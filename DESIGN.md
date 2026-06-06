@@ -78,6 +78,11 @@ zone 在服务端落地为 nftables set，是 forward 链上的允许规则。
 - 公网、DNS 走本机原路径。
 - 服务器**不做** MASQUERADE，**不做** DNS 转发。
 - 客户端 `PersistentKeepalive = 25`（NAT 保活 + 在线状态判定基础）。
+- 客户端**可选**主机入站放行（feature 018，默认关、Windows-only）：用户在主面板勾选且隧道已连接时，
+  客户端用 `netsh advfirewall` 装一条具名入站放行规则 `lanweave-vpn-inbound`（`remoteip=100.127.0.0/16`、
+  inbound、所有端口、`profile=any`），让同网段 peer 能反向访问本机服务。规则存在当且仅当（开关开 ∧ 已连接）：
+  连接 / 勾选-且-已连接时装，断开 / 取消勾选 / 登出 / 退出时删；具名 + 幂等（删后再加）+ 启动孤儿清扫。
+  仅 Windows 生效，其它平台为 no-op（偏好仍持久化）。
 
 ### 3.5 WireGuard 密钥
 - **客户端生成**密钥对，私钥仅本机存储（Windows DPAPI / keyring）。
@@ -269,12 +274,16 @@ table inet lanweave {
 
 ### 9.3 首次启动 wizard
 1. **服务器地址**：输入 server URL（如 `https://vpn.example.com`）。
-2. **证书信任**：
+2. **证书信任（TOFU，feature 018 取代 017 会话级 opt-in）**：
    - 默认走系统 CA / LE 信任链。
-   - 自签名场景：要求运维预装根 CA。
-   - "忽略证书验证"默认不在 UI 暴露 —— 防止用户无脑勾选。保留 `--insecure` CLI flag（仅 troubleshooting）；
-     UI 中**仅在证书校验真实失败时**反应式弹窗，提供「继续（不安全）」选项：必须显式确认、**仅当前会话生效且永不持久化**、
-     接受后全程显示常驻「证书未验证」警示；不提供常驻勾选框 / 开关（feature 017）。
+   - 自签名 / 内网 CA 场景：**首次连接**若证书过不了系统 CA，反应式弹窗显示该 server 的叶证书 SHA-256 指纹，
+     请用户「在本设备信任此证书?」；接受后把指纹持久化到 `state.json`（按 server 钉，`PinnedCertSHA256`）。
+   - 此后验证规则为「叶证书指纹 == 已钉指纹 **或** 过系统 CA」：已信任的自签 server 重启后**静默**连接，
+     其它无法验证的证书仍被拒。主面板显示中性指示「self-signed (trusted on this device)」。
+   - 已钉 server 出现**指纹变更且仍过不了系统 CA** → 弹更重的「证书已变更」警告、阻断、需显式接受方可连接，
+     接受则覆盖旧钉。拒绝首次信任 / 变更警告均不建立连接。
+   - 保留 `--insecure` CLI flag（仅 troubleshooting，完全不验证，常驻「证书未验证」警示）；UI 不提供「跳过验证」开关，
+     也不再提供 017 的「仅本次会话、不记住」路径——TOFU 已取代之。
 3. **账号**：
    - 已有账号 → 登录（username/password）。
    - 新用户 → 输入邀请码 + 用户名 + 密码 → 注册。
@@ -290,6 +299,8 @@ table inet lanweave {
 - "加入 zone" 按钮：输入 zone name + 密码。
 - "创建 zone" 按钮：输入 zone name + 密码。
 - owner 操作（仅自己 owner 的 zone 上显示）：改密 / 踢人 / 删 zone。
+- 底部页脚（feature 018）：「允许 VPN 网段入站（100.127.0.0/16）」开关——默认关、持久化，旁附常驻内联
+  警告说明开启会让同网段 peer 触达本机所有本地服务，无二次确认弹窗。
 
 ---
 
@@ -359,10 +370,12 @@ password = "ChangeMeOnFirstLogin!"  # 明文，首次启动后建议改并重启
 | TOML 中 admin 明文密码                   | `chmod 600`、不入 git、首次后建议改        |
 | JWT 不可吊销                             | 1–2h 短期过期；重启换密钥可全吊销          |
 | 无账户级失败计数（仅全局限流）           | v1.1 补；上线后观察                        |
-| 跳过证书验证（`--insecure` CLI flag + 证书失败时的反应式 UI opt-in） | CLI flag 仅 troubleshooting；UI 仅在校验失败时弹窗、显式确认、会话级不持久、常驻「未验证」警示；无常驻开关（017） |
+| 跳过证书验证（`--insecure` CLI flag） | 仅 troubleshooting，完全不验证、常驻「未验证」警示；UI 不暴露此开关 |
+| TOFU 信任自签 / 内网证书（feature 018 取代 017 会话级 opt-in） | 首次连接证书过不了系统 CA 时弹窗、显式信任、按 server 持久化叶证书 SHA-256 指纹；验证=指纹或系统 CA；证书变更弹更重警告并阻断、需显式接受；中性「已信任」指示 |
+| 客户端主机防火墙入站放行（feature 018，默认关、Windows-only） | 用户显式勾选且隧道已连接才装具名规则 `lanweave-vpn-inbound`（仅 `remoteip=100.127.0.0/16`、`profile=any`）；开启即让同网段 peer 触达本机所有本地服务，旁附常驻内联警告（无二次确认）；断开 / 取消 / 登出 / 退出即删，启动清扫孤儿规则 |
 | 服务进程 root 运行                       | systemd 用 CapabilityBoundingSet 缩小      |
 | 发布产物未签名（Windows installer / .deb） | 发布说明提示 SmartScreen「更多信息→仍要运行」；附 `SHA256SUMS` 供完整性校验 |
-| 桌面 GUI（Fyne 弹窗 / 指示器）以人工 quickstart 矩阵验收，非自动化端到端测试 | 安全相关逻辑（登出序列、证书失败→重建 insecure）仍有 apiclient / controller 层自动化验收；仅纯 GUI 呈现走人工（宪法 II 的 GUI 豁免，017 登记） |
+| 桌面 GUI（Fyne 弹窗 / 指示器 / 开关）与主机 `netsh` 防火墙调用以人工 quickstart 矩阵验收，非自动化端到端测试 | 安全相关逻辑（登出序列、证书失败→TOFU 钉扎/比对、`CertError`/`ErrCertChanged` 路径、防火墙开关决策真值表 controller 层 T015 自动覆盖）仍有 apiclient / controller 层自动化验收；仅纯 GUI 呈现与 `netsh` 执行效果（含 018 的 TOFU 首次信任/变更弹窗，及防火墙规则实际装/删 + peer 反向触达本机）走人工（宪法 II 的 GUI/exec 豁免，017 登记，018 延伸；US2 端到端为实机 + 实 peer 的固有结果，无法在 `unshare` 网关内复现，落到 Windows 人工矩阵——接受发现 C1） |
 
 ---
 

@@ -1,7 +1,9 @@
 package apiclient_test
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,6 +13,12 @@ import (
 	"lanweave/internal/client/apiclient"
 	"lanweave/pkg/protocol"
 )
+
+// certFP is the lowercase-hex SHA-256 of a certificate's DER bytes — the TOFU pin form.
+func certFP(c *x509.Certificate) string {
+	sum := sha256.Sum256(c.Raw)
+	return hex.EncodeToString(sum[:])
+}
 
 // testMux returns a handler emulating the server endpoints the client uses, with
 // programmable conflict cases.
@@ -202,6 +210,56 @@ func TestTLSVerification(t *testing.T) {
 	// The --insecure escape hatch also works.
 	if err := apiclient.New(srv.URL, apiclient.WithInsecure()).Login("alice", "correct"); err != nil {
 		t.Errorf("insecure login should succeed, got %v", err)
+	}
+}
+
+// TestTOFUPinning is the US1 acceptance test (FR-001/002/003/005): a real TLS round trip
+// against self-signed httptest servers exercises first-trust fingerprint capture, the
+// pin-or-CA verifier, and the changed-certificate path — no crypto mocks.
+func TestTOFUPinning(t *testing.T) {
+	srv := httptest.NewTLSServer(testMux())
+	t.Cleanup(srv.Close)
+	fp := certFP(srv.Certificate())
+
+	// (a) First trust: a default client fails with a *CertError that Is ErrUntrustedCert and
+	// carries the leaf fingerprint, with Changed=false (no pin was configured).
+	err := apiclient.New(srv.URL).Login("alice", "correct")
+	if !errors.Is(err, apiclient.ErrUntrustedCert) {
+		t.Fatalf("first-trust: got %v, want ErrUntrustedCert", err)
+	}
+	var ce *apiclient.CertError
+	if !errors.As(err, &ce) {
+		t.Fatalf("first-trust error should be *CertError, got %T", err)
+	}
+	if ce.Fingerprint != fp {
+		t.Errorf("captured fingerprint = %q, want %q", ce.Fingerprint, fp)
+	}
+	if ce.Changed {
+		t.Error("first-trust CertError.Changed should be false")
+	}
+
+	// (b) Pinned to that fingerprint → verification passes silently.
+	if err := apiclient.New(srv.URL, apiclient.WithPinnedCert(fp)).Login("alice", "correct"); err != nil {
+		t.Errorf("pinned login should succeed, got %v", err)
+	}
+
+	// (c) A CA-valid certificate passes regardless of a bogus pin (pin OR system/roots).
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	if err := apiclient.New(srv.URL, apiclient.WithRootCAs(pool), apiclient.WithPinnedCert("deadbeef")).Login("alice", "correct"); err != nil {
+		t.Errorf("CA-valid with bogus pin should succeed, got %v", err)
+	}
+
+	// (d) Changed certificate: a client pinned to some OTHER fingerprint connects to a server
+	// whose presented (still-untrusted) certificate matches neither the pin nor a system root
+	// → ErrCertChanged carrying the actually-presented fingerprint, with Changed=true.
+	err = apiclient.New(srv.URL, apiclient.WithPinnedCert("00deadbeef00")).Login("alice", "correct")
+	if !errors.Is(err, apiclient.ErrCertChanged) {
+		t.Fatalf("changed cert: got %v, want ErrCertChanged", err)
+	}
+	var ce2 *apiclient.CertError
+	if !errors.As(err, &ce2) || ce2.Fingerprint != fp || !ce2.Changed {
+		t.Errorf("changed CertError = %+v, want Fingerprint=%s Changed=true", ce2, fp)
 	}
 }
 

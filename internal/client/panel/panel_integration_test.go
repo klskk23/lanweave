@@ -122,7 +122,7 @@ func onboardUser(t *testing.T, url string, pool *x509.CertPool, invite, username
 	}
 	rec := state.Record{NodeName: devName, IP: node.IP, ServerURL: url, Network: "100.127.0.0/16"}
 	statePath := filepath.Join(t.TempDir(), "state.json")
-	return panel.New(c, rec, keyring.NewFake(), statePath, false), c
+	return panel.New(c, rec, keyring.NewFake(), statePath, false, &fakeFirewall{}), c
 }
 
 // TestPanelIntegrationViewCreateJoin covers US1 (view + this-machine) and US2 (create/join/
@@ -292,7 +292,7 @@ func TestPanelIntegrationLogout(t *testing.T) {
 	if err := state.Save(statePath, rec); err != nil {
 		t.Fatalf("save state: %v", err)
 	}
-	ctrl := panel.New(c, rec, keys, statePath, false)
+	ctrl := panel.New(c, rec, keys, statePath, false, &fakeFirewall{})
 
 	// Alice owns a zone (auto-joins laptop); bob joins so the zone — and thus the membership
 	// cascade after logout — is observable from a surviving member.

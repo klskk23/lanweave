@@ -12,8 +12,10 @@ import (
 	"runtime"
 )
 
-// SchemaVersion is the current state-record schema version.
-const SchemaVersion = 1
+// SchemaVersion is the current state-record schema version. v2 (feature 018) adds the
+// TOFU certificate pin and the firewall-allow preference; v1 records load unchanged with
+// both new fields defaulted.
+const SchemaVersion = 2
 
 // Record is the persisted, non-secret onboarding record.
 type Record struct {
@@ -24,6 +26,13 @@ type Record struct {
 	ServerPublicKey string `json:"server_public_key"`
 	Endpoint        string `json:"endpoint"`
 	Network         string `json:"network"`
+
+	// PinnedCertSHA256 is the lowercase-hex SHA-256 of the server leaf certificate the user
+	// trusted on this device (TOFU). Empty means unpinned. Tied to ServerURL.
+	PinnedCertSHA256 string `json:"pinned_cert_sha256,omitempty"`
+	// FirewallAllowVPN is the persisted preference to allow inbound traffic from the VPN
+	// subnet to this device. false (default) means closed.
+	FirewallAllowVPN bool `json:"firewall_allow_vpn,omitempty"`
 }
 
 // DefaultPath returns the per-user state file path: %LOCALAPPDATA%\lanweave\state.json on
