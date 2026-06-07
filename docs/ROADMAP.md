@@ -1,6 +1,6 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化），021 为服务端可选明文 HTTP 监听（供反向代理终止 TLS）。
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化），021 为服务端可选明文 HTTP 监听（供反向代理终止 TLS），022 为客户端主页面与 Wizard 视觉改版（按 `UI-DESIGN.md`/`UI-example.png`，Material 3 启发的深色 flat 风格）。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -32,6 +32,7 @@
 | 019 | client-session-persist-fix ✅           | 客户端     | 009, 011   | 向导登录/注册完成后直接进面板,不再二次要求登录;冷启动复用已缓存会话 |
 | 020 | client-i18n ✅                           | 客户端     | 009, 011   | 客户端 UI 中/英双语,启动按系统语言,可手动切换(重启生效) |
 | 021 | server-http-mode ✅                      | 服务端     | 001        | 服务端可配 tls=false 监听明文 HTTP(供反代终止 TLS);默认仍 HTTPS,缺 cert 仍硬失败,现存配置不降级 |
+| 022 | client-ui-redesign                      | 客户端     | 010, 011, 020 | 主页面+Wizard 按 UI-DESIGN.md/UI-example.png 重做(Material 3 深色 flat):自定义主题/App Bar+overflow/Hero 卡片/列表 avatar+状态点/Switch/区域详情页/流量计数;Wizard 仅套主题,客户端行为零回归 |
 
 ---
 
@@ -470,6 +471,40 @@
 - `X-Forwarded-For` / 可信代理（限流本就全局、无安全影响；反代后日志记代理 IP 作为已知小限制）。
 - postinstall 增 HTTP 安装模式（证书生成 / 默认配置不变）。
 - 任何客户端改动。
+
+---
+
+### 022 — client-ui-redesign
+**背景**
+- 主页面（`internal/client/ui/panel.go`）与 Wizard（`wizard.go`）现为 Fyne 默认主题、`widget.Label` 堆叠：状态用 `[在线]` 括号文本、连接/断开两个并排按钮、防火墙 checkbox 在 footer、退出登录常驻、App 标题居中。`docs/UI-DESIGN.md` + `docs/UI-example.png` 给出 Material 3 启发的深色 flat 规范（品牌色、字号层级、App Bar + Hero 卡片 + 列表 avatar/状态点 + Switch + pill 按钮）。本切片按规范全量重做主页面，Wizard 套同一主题。
+- 控制器（panel / onboard）无 UI、只回传 typed error + 视图数据，改造集中在 `internal/client/ui/`（+ tunnel 暴露流量计数一处），客户端业务行为零回归。
+
+**范围**
+- **自定义主题**（`internal/client/ui/theme.go`，gui tag，挂 `main`）：品牌色 + 字号 + 间距，**强制深色**（VariantDark，忽略系统明暗）。
+- **App Bar（48px）**：左对齐 logo（24）+「lanweave」（16/500）+ 底部 0.5px divider；右侧 ⋮ overflow 菜单 = 语言（跟随系统 / 中文 / English 子菜单，重启生效）+ 退出登录（红，置底）。**不新建设置 / 关于**。信任状态进 overflow：insecure 时红字「证书未验证」项，自签 pin 时中性「已在本机信任」项（**已接受的 UX 取舍**：安全信号弱于 018 常驻警告条，换取主界面整洁）。
+- **Hero 卡片（本设备）**：status row（● 已连接 / 正在连接 / 未连接 / 连接失败 + ↑ / ↓ 流量）+ 设备名（18）+ VPN IP（13 mono）+ **单一 pill 主按钮**（连 / 断切换，取代双按钮）+ divider + 「允许 VPN 入站访问」Switch 行 + CIDR 副标题（从 footer 移入）。
+- **流量计数（新数据源）**：`tunnel` / WG 引擎暴露 per-peer transfer 字节（ReceiveBytes / TransmitBytes），连接期间按更快节奏轮询、Hero 显示 ↑ / ↓，断开隐藏并复位。本切片唯一触达 `tunnel` 包的部分。
+- **Tabs + 列表**：「节点 N」「区域 N」带 leading icon + count badge + 2px BrandCyan indicator；节点行 avatar + 右下状态点 | 名 / IP（mono，离线拼接「N 分钟前离线」，数据用现有 `DeviceView.LastSeen`）| 本机行加「本机」chip + `BrandCyanFaded` 高亮，**纯展示不可点**；区域行扁平 avatar + 名 + owner chip，**整行点击 → 区域详情 sheet**（成员 / 退出 / 改密 / 删除 / 踢人均在内）。
+- **创建 / 加入区域**：右下角 FAB「+」弹创建 / 加入二选一。
+- **自定义控件**：Switch（替代 checkbox）、Avatar + 状态点、Pill chip、状态指示器。
+- **Wizard**：仅套主题——保留四步流程 + Back / Cancel / Next 逻辑不动，换配色 / 字号 / pill 主按钮 / 卡片包裹 body，语言选择器留顶部。
+- **i18n**：新增 / 改写文案（已连接、断开连接、立即连接、允许 VPN 入站访问、本机、证书未验证、流量等）zh-Hans + en 双语同步；校验 tab 名为「节点 / 区域」。
+
+**验收**
+- 每个 user story ≥1 个 Fyne `test` 包 headless 控件测试（单按钮按状态切换、本机 chip + 高亮、Switch 反映 firewall 偏好、流量字节格式化、区域行点击开详情）。
+- Mesa OpenGL VM 上肉眼逐条过 `UI-DESIGN.md` §8 验收清单（App Bar 左对齐、单一主按钮、状态圆点非括号、avatar + 状态点、本机 chip、入站 toggle 在 Hero 内、Switch 非 checkbox、pill 按钮、mono IP、无渐变 / 阴影 / glow）。
+- `unshare -rUn go test ./...` 仍全绿（本期不动 SQLite / nftables / WireGuard 服务端逻辑，宪法 II 不受影响）。
+
+**不做**
+- 新建设置页 / 关于页（overflow 仅放已有项）。
+- 信任状态常驻警告条（改为 overflow 菜单项，已接受）。
+- 节点详情 / 编辑（节点行纯展示）。
+- Wizard 布局 / 交互重构（仅套主题）。
+- 浅色主题（强制深色）。
+- 第三种语言 / 运行时实时切换语言（沿用 020：重启生效）。
+
+**依赖 / 关联**
+- 011（主面板）、020（i18n，新文案走双语）、010（隧道连接状态 + 流量字节计数）。
 
 ---
 
