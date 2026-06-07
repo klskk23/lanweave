@@ -39,6 +39,7 @@ func main() {
 	flag.Parse()
 
 	a := app.NewWithID("com.lanweave.client")
+	a.Settings().SetTheme(ui.NewTheme()) // forced-dark brand theme (feature 022)
 	// Pick the UI language before building any view: a saved preference (set via the in-app
 	// language selector) wins; an empty preference follows the system locale. Must run before
 	// the first NewWizard/NewPanel and is independent of the local state file.

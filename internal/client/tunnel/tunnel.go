@@ -51,6 +51,7 @@ var (
 type engine interface {
 	up(uapiConfig string, ip netip.Addr, network netip.Prefix) (ifName string, err error)
 	handshaked() (bool, error)
+	transfer() (rx, tx int64, err error)
 	close() error
 }
 
@@ -91,6 +92,20 @@ func (t *Tunnel) InterfaceName() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.ifName
+}
+
+// Transfer returns this tunnel's cumulative received/sent bytes for the current connection
+// (summed across peers), driving the Hero card's ↑/↓ display. The values are cumulative, not a
+// rate: they only increase within a connection and reset to 0 on the next one (a fresh device).
+// When not connected (no engine) it returns (0, 0, nil) — absence of traffic, not an error.
+func (t *Tunnel) Transfer() (rx, tx int64, err error) {
+	t.mu.Lock()
+	eng := t.eng
+	t.mu.Unlock()
+	if eng == nil {
+		return 0, 0, nil
+	}
+	return eng.transfer()
 }
 
 // Connect brings the tunnel up: build the profile, create the device + adapter, probe the
@@ -242,6 +257,36 @@ func (e *wgEngine) handshaked() (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// transfer reports cumulative received/sent bytes by parsing the same dev.IpcGet() UAPI text
+// that handshaked() reads: every peer line carries rx_bytes=/tx_bytes= (cumulative per-peer
+// counters); summing them yields the device totals. No new syscall surface beyond IpcGet().
+func (e *wgEngine) transfer() (rx, tx int64, err error) {
+	if e.dev == nil {
+		return 0, 0, nil
+	}
+	s, err := e.dev.IpcGet()
+	if err != nil {
+		return 0, 0, err
+	}
+	rx, tx = sumTransfer(s)
+	return rx, tx, nil
+}
+
+// sumTransfer sums the per-peer rx_bytes=/tx_bytes= counters in WireGuard UAPI text. Split out
+// as a pure function so the parsing/aggregation is unit-testable with fixed multi-peer text.
+func sumTransfer(uapi string) (rx, tx int64) {
+	for line := range strings.SplitSeq(uapi, "\n") {
+		if v, ok := strings.CutPrefix(line, "rx_bytes="); ok {
+			n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			rx += n
+		} else if v, ok := strings.CutPrefix(line, "tx_bytes="); ok {
+			n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			tx += n
+		}
+	}
+	return rx, tx
 }
 
 func (e *wgEngine) close() error {

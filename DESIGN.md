@@ -279,11 +279,12 @@ table inet lanweave {
    - 自签名 / 内网 CA 场景：**首次连接**若证书过不了系统 CA，反应式弹窗显示该 server 的叶证书 SHA-256 指纹，
      请用户「在本设备信任此证书?」；接受后把指纹持久化到 `state.json`（按 server 钉，`PinnedCertSHA256`）。
    - 此后验证规则为「叶证书指纹 == 已钉指纹 **或** 过系统 CA」：已信任的自签 server 重启后**静默**连接，
-     其它无法验证的证书仍被拒。主面板显示中性指示「self-signed (trusted on this device)」。
+     其它无法验证的证书仍被拒。主面板在 **App Bar overflow 菜单**显示中性项「self-signed (trusted on this device)」（feature 022：由原常驻指示改记为 overflow 菜单项）。
    - 已钉 server 出现**指纹变更且仍过不了系统 CA** → 弹更重的「证书已变更」警告、阻断、需显式接受方可连接，
      接受则覆盖旧钉。拒绝首次信任 / 变更警告均不建立连接。
-   - 保留 `--insecure` CLI flag（仅 troubleshooting，完全不验证，常驻「证书未验证」警示）；UI 不提供「跳过验证」开关，
-     也不再提供 017 的「仅本次会话、不记住」路径——TOFU 已取代之。
+   - 保留 `--insecure` CLI flag（仅 troubleshooting，完全不验证）；该状态在 App Bar overflow 菜单显示红色项
+     「证书未验证」（feature 022：由原常驻警示条改记为 overflow 菜单项，属已接受的 UX 取舍——警示从常驻降级为
+     菜单内可见）。UI 不提供「跳过验证」开关，也不再提供 017 的「仅本次会话、不记住」路径——TOFU 已取代之。
 3. **账号**：
    - 已有账号 → 登录（username/password）。
    - 新用户 → 输入邀请码 + 用户名 + 密码 → 注册。
@@ -292,15 +293,22 @@ table inet lanweave {
 6. **拿配置**：服务端返回 `{ip, server_pubkey, endpoint, network}`，组装 WG 配置，调 wireguard-go 拉起隧道。
 7. **完成**：跳到主面板。
 
-### 9.4 主面板
-- 顶部：当前 node 状态（IP、隧道开关、最近握手）。
-- "我的 nodes" 标签：列出名下所有 node（含其他机器，标注本机的那个）。
-- "我的 zones" 标签：列出本 node 加入的 zone，每个 zone 展开见 member。
-- "加入 zone" 按钮：输入 zone name + 密码。
-- "创建 zone" 按钮：输入 zone name + 密码。
-- owner 操作（仅自己 owner 的 zone 上显示）：改密 / 踢人 / 删 zone。
-- 底部页脚（feature 018）：「允许 VPN 网段入站（100.127.0.0/16）」开关——默认关、持久化，旁附常驻内联
-  警告说明开启会让同网段 peer 触达本机所有本地服务，无二次确认弹窗。
+### 9.4 主面板（feature 022 改版：Material 3 启发的深色 flat 布局，见 `docs/UI-DESIGN.md`）
+- **App Bar**（顶部 48px）：左对齐 logo + 「lanweave」，**非居中大标题**；右侧 ⋮ overflow 菜单——含
+  语言切换（跟随系统 / 中文 / English，重启生效）、证书信任状态项（见 §9.3）、置底红色「退出登录」。
+  退出登录**不再常驻主界面**，收入 overflow（feature 022 改）。
+- **Hero 卡片（本设备）**：状态行用圆点 + 颜色 + 简短文字（已连接 / 正在连接 / 未连接 / 连接失败，**非
+  `[离线]` 括号文本**），连接时右侧显示本次连接的累计 ↑/↓ 流量（断开隐藏并复位）；设备名 + 等宽 VPN IP；
+  **单一** pill 主按钮按隧道状态在「立即连接 / 断开连接」间切换（**非两个并排按钮**）；分隔线后置「允许 VPN
+  入站访问」**Switch**（feature 018 的入站放行偏好，由 checkbox 改为 Switch）+ `100.127.0.0/16` 副标题。
+- **节点 / 区域 tab**（带计数，选中有 2px 品牌青指示条；名为「节点 / 区域」**非「我的…」**）：
+  - 节点行：avatar + 右下状态点 + 名 + 等宽 IP；离线行拼「N 分钟前离线」且文字最浅（tertiary）；本机行加
+    「本机」chip + 高亮背景，纯展示不可点（节点无详情）。
+  - 区域行：扁平 avatar + 名 +（owner）chip；**整行可点 → 区域详情 sheet**（成员列表 / 退出 / owner 的改密·
+    踢人·删除）。
+- **右下「+」FAB**：弹「创建区域 / 加入区域」二选一，分别进既有流程。
+- 入站放行的安全语义（开启即让同网段 peer 触达本机所有本地服务、无二次确认、断开/退出即删）不变，仅呈现
+  位置从底部页脚迁入 Hero 卡片（feature 018 → 022）。
 
 ---
 
@@ -370,9 +378,9 @@ password = "ChangeMeOnFirstLogin!"  # 明文，首次启动后建议改并重启
 | TOML 中 admin 明文密码                   | `chmod 600`、不入 git、首次后建议改        |
 | JWT 不可吊销                             | 1–2h 短期过期；重启换密钥可全吊销          |
 | 无账户级失败计数（仅全局限流）           | v1.1 补；上线后观察                        |
-| 跳过证书验证（`--insecure` CLI flag） | 仅 troubleshooting，完全不验证、常驻「未验证」警示；UI 不暴露此开关 |
-| TOFU 信任自签 / 内网证书（feature 018 取代 017 会话级 opt-in） | 首次连接证书过不了系统 CA 时弹窗、显式信任、按 server 持久化叶证书 SHA-256 指纹；验证=指纹或系统 CA；证书变更弹更重警告并阻断、需显式接受；中性「已信任」指示 |
-| 客户端主机防火墙入站放行（feature 018，默认关、Windows-only） | 用户显式勾选且隧道已连接才装具名规则 `lanweave-vpn-inbound`（仅 `remoteip=100.127.0.0/16`、`profile=any`）；开启即让同网段 peer 触达本机所有本地服务，旁附常驻内联警告（无二次确认）；断开 / 取消 / 登出 / 退出即删，启动清扫孤儿规则 |
+| 跳过证书验证（`--insecure` CLI flag） | 仅 troubleshooting，完全不验证；状态于 App Bar overflow 菜单红色项「证书未验证」可见（feature 022：由常驻警示降级为菜单项，已接受的 UX 取舍）；UI 不暴露此开关 |
+| TOFU 信任自签 / 内网证书（feature 018 取代 017 会话级 opt-in） | 首次连接证书过不了系统 CA 时弹窗、显式信任、按 server 持久化叶证书 SHA-256 指纹；验证=指纹或系统 CA；证书变更弹更重警告并阻断、需显式接受；中性「已信任」项于 overflow 菜单（feature 022 改） |
+| 客户端主机防火墙入站放行（feature 018，默认关、Windows-only） | 用户显式开启 Hero 卡片内 Switch 且隧道已连接才装具名规则 `lanweave-vpn-inbound`（仅 `remoteip=100.127.0.0/16`、`profile=any`）；开启即让同网段 peer 触达本机所有本地服务（无二次确认，开关旁 CIDR 副标题标识范围）；断开 / 取消 / 登出 / 退出即删，启动清扫孤儿规则 |
 | 服务端明文 HTTP 监听（`tls=false`，feature 021） | 仅显式 `tls=false` 才明文；缺省/`tls=true` 仍 HTTPS 且缺证书硬失败（绝不静默降级）；明文绑定非回环地址启动告警；须置于 TLS 终止反代之后、勿暴露明文监听公网；客户端仍连反代 `https://`、数据面 WireGuard 不变 |
 | 服务进程 root 运行                       | systemd 用 CapabilityBoundingSet 缩小      |
 | 发布产物未签名（Windows installer / .deb） | 发布说明提示 SmartScreen「更多信息→仍要运行」；附 `SHA256SUMS` 供完整性校验 |
