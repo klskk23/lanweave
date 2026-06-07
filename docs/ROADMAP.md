@@ -38,6 +38,7 @@
 | 025 | client-logout-hardening                  | 客户端     | 017, 024   | 退出登录时服务器 API 网络不可达(3 次 1s 重试仍失败)则阻止退出 + 弹窗(取消 / 强制退出逃生口),避免残留孤儿 node;登出额外吊销本设备 RT |
 | 026 | invite-expiry                            | 服务端     | 002        | 邀请码有有效期:配置 `invite_ttl` 全局默认 24h,建码时写 `expires_at=created_at+ttl`;`0`/空 与旧码=NULL=永不过期;过期码注册被拒并归入通用「邀请码无效」 |
 | 027 | password-complexity                      | 服务端/客户端 | 002, 009   | 账号密码复杂度:8–64 ASCII 字符,至少含大写+小写+数字,无空格/非 ASCII;共享 `pkg/passwordpolicy` 单一真源,服务端注册时权威拦截(`validation_error`),客户端向导本地逐条提示+常驻规则说明;**仅注册生效**,登录不校验(旧弱密码/bootstrap admin 不受影响);zone 密码范围外 |
+| 028 | tunnel-auto-reconnect                    | 客户端     | 010, 011, 018 | 握手陈旧自愈重连:新起 health goroutine 每 15s 查 wg 最后握手,已连接但 age>240s 自动重连;`desiredConnected` 仅内存态(手动连成功置真/手动断开置假),重连失败每 15s 重试到底(无退避),手动断开必胜(单飞守卫);重试中 UI 黄灯+按钮显「断开」、全程静默;wg 源端口本即 OS 随机临时端口(已满足,仅文档化) |
 
 ---
 
@@ -682,6 +683,45 @@
 **依赖 / 关联**
 - 002（`register` 校验点、`invites`/邀请码）。
 - 009（客户端向导 `stepAuth` 创建账户表单、i18n）。
+
+---
+
+### 028 — tunnel-auto-reconnect
+**背景**
+- 现状两处缺口（已读码确认）：(1) `tunnel.handshaked()` 只判 `last_handshake_time_sec > 0`（握手过没有），**不看新旧**；面板 `pollLoop` 每 15s 只 `refresh()` 拉服务器节点列表，`State()` 返回缓存字段，一旦置 `Connected` 就永远 Connected——链路静默断掉（NAT 重绑 / 服务器重启 / 切网 / 休眠唤醒）时 UI 仍显示已连接、流量停摆，**无任何活性检测**。(2) 期望「客户端每次连接 wg 源端口随机」——但 `BuildUAPIConfig` 本就不设 `listen_port`，`conn.NewDefaultBind()` 绑端口 0 = OS 每次分配随机临时端口，且每次 `Connect()` 新建 device → 新端口，**现状已满足**，本切片不改源端口、仅文档化以防回退。
+- 需求核心：客户端在选择连接状态时轮询自身最后握手时间，超阈值自动重连。grill 阶段定下保守阈值、内存态意图、单飞守卫、静默自愈等全部决策。
+
+**范围**
+- **源端口（A，零代码改动）**：确认现状每次连接为 OS 随机临时端口（新 device → 新 bind → 新端口）；不强制换端口 / 不去重（OS 偶发复用同端口的边角风险已接受）；仅写进 DESIGN 固化为依赖约束。
+- **活性谓词（tunnel 层）**：`engine` 新增读出 `last_handshake_time_sec` 时间戳的能力；`tunnel` 持**可注入的 clock + 阈值字段**（沿用现有 `connectTimeout`/`pollInterval` 注入模式），对外暴露纯谓词 `Stale() bool`，语义 = `state==Connected 且 (now - lastHandshake) > 阈值`。UAPI 文本解析抽成纯函数。**阈值 240s（保守）**。
+- **意图标志（UI 层，仅内存）**：`desiredConnected bool`——手动连接**成功**置 `true`，手动断开置 `false`；**不持久化**，App 重启即 `false`（「启动自动连接」属另一切片，范围外）。手动连接**失败**时 desired 保持 `false`，故失败不触发自动重试（自动重连只维持「已建立的连接」，不接管「建立连接」）。
+- **自愈 goroutine（专用，不阻塞 pollLoop）**：**新起一个独立 goroutine（自带 15s ticker）**承载活性检测 + 重连；现有 `pollLoop`（节点列表刷新）原样不动、永不被 8s 的 `Connect()` 阻塞。每拍当 `desiredConnected==true`：`Connected && Stale()` → 重连（`teardown` + `Connect()`）；`Disconnected`（上次重连没赶上外网恢复）→ 继续重连；`Connecting`（手动连接进行中）→ 跳过。重连失败每 15s 重试**到底**，直到连回或用户手动断开，**无指数退避**。
+- **单飞守卫 + 事实源对账**：所有连 / 断状态切换（手动 `onConnect`/`onDisconnect` 与自动重连）经同一把单飞守卫**串行化**，`desiredConnected` 为唯一事实源；任一 `Connect()` 尝试结束后与 `desiredConnected` 对账——若期间用户已置 `false`，即便 `Connect()` 恰好成功也立即 `teardown` 回断开（**手动断开必胜**）。一并根治现状竞态：在飞的 `Connect()` 成功回写 `state=Connected` 把刚被 `teardown` 的隧道「复活」+ 泄漏 device。**会改现有 `onConnect`/`onDisconnect`**（非纯新增）。
+- **UI 呈现（静默自愈）**：状态由 `(state, desiredConnected)` 推导、非裸 `state`——「想连但暂时断、后台重试中」复用 `connecting…` 黄灯（表达「正在恢复」，不报红错）；重试中主按钮显「断开」（点击置 `desiredConnected=false` 并停止重试，是用户叫停后台循环的唯一入口）；整个自动重连 / 重试**全程静默**，不弹任何 dialog/toast，只动状态行与按钮。
+- **防火墙对账（镜像手动）**：自动重连每次 `teardown` → `ReconcileFirewall(false)`，每次重连成功 → `ReconcileFirewall(true)`，维持不变量「入站规则存在 ⟺（开关 ON ∧ 隧道实连）」；「黄灯重试中」窗口入站访问短暂关闭（根本没隧道，本不该放行），连回自动恢复。
+
+**DESIGN.md 修订（宪法强制，同 PR）**
+- §6（连接 / keepalive）补：握手陈旧（>240s）自愈重连机制、`desiredConnected` 内存态语义（重启不自动连）、重试窗口入站防火墙关闭；并写明「客户端 wg 源端口为 OS 随机临时端口、本设计依赖之，勿设固定 `listen_port`」。
+
+**验收**
+- 端到端（netns `unshare -rUn` + 真 wireguard-go，复用 `tunnel_integration_test.go`）：连上后令链路失活（如断服务器可达）→ age 超阈值后 UI 转黄灯重试 → 链路恢复后自动回绿；重试期间手动「断开」→ 停止重试并保持断开（按钮可用）；手动连接失败 → **不**自动重试。
+- 并发不退化：8s 的重连尝试期间，`pollLoop` 节点列表刷新不被阻塞。
+- 防火墙：重试窗口内具名入站规则消失，重连成功后恢复。
+- 单测（零 sleep）：UAPI 解析纯函数（固定文本抽时间戳）；`Stale()` 注入 `now`——拨到时间戳后 241s 断言 `true`、239s 断言 `false`；阈值字段可注入（测试用毫秒级）。
+- 源端口：连续两次 `Connect()` 的 `listen_port` 不同（或仅文档化，按 plan 阶段定）。
+
+**不做**
+- 启动 / 开机自动连接（`desiredConnected` 不持久化，重启回断开）——另开切片。
+- 强制随机 / 去重 wg 源端口（OS 临时端口已满足；不强制换端口，未来若重连撞旧端口残留再议）。
+- 指数退避 / 把 240s 阈值暴露成用户可配项（固定值，仅代码内可注入供测试）。
+- `context` 取消式打断在飞的 `Connect()`（选了单飞守卫 + 对账，不改 `Connect()` 签名）。
+- 任何服务端改动（纯客户端切片）。
+
+**依赖 / 关联**
+- 010（隧道 `Connect`/`Disconnect`/`teardown`、`wgEngine` 握手读取）。
+- 011（面板 `pollLoop`、连接状态渲染）。
+- 018（防火墙 `ReconcileFirewall` 生命周期复用）。
+- 022（Hero 状态渲染 / 流量轮询；状态映射改为按 `(state, desiredConnected)` 推导）。
 
 ---
 

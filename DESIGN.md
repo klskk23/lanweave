@@ -323,6 +323,30 @@ table inet lanweave {
 - 入站放行的安全语义（开启即让同网段 peer 触达本机所有本地服务、无二次确认、断开/退出即删）不变，仅呈现
   位置从底部页脚迁入 Hero 卡片（feature 018 → 022）。
 
+### 9.5 连接自愈与源端口随机（slice 028）
+
+- **源端口随机（FR-017）**：每次 `Connect()` 都新建一个 wireguard-go `device` 并用 `conn.NewDefaultBind()`，
+  **从不写 `listen_port=`** 到 UAPI 配置 → OS 每次分配一个新的临时 UDP 源端口。无固定监听端口、无端口复用；
+  这是结构性不变量（由集成回归测试守护：连续两次 `Connect()` 源端口不同）。
+- **握手陈旧自愈重连（FR-001~FR-016）**：客户端跑一个**独立**的健康巡检 goroutine（15s ticker，与节点列表
+  `pollLoop` 解耦，互不阻塞）。每 tick 读取 wireguard-go 的 `last_handshake_time_sec`：当用户意图为「保持连接」
+  且链路存活但最后握手 age 超过 **240s 阈值**（健康链路有 keepalive，age 上界约 120s，恒不触发）→ 判定链路已
+  静默断掉，自动重连；重连失败按**固定 15s 周期无退避**重试，直到恢复或用户手动断开。全程**静默**——只更新
+  状态行与按钮，不弹任何对话框。
+- **`desiredConnected` 用户意图（仅内存态，FR-006/007/008）**：表达「用户是否希望保持连接」，**不持久化**
+  （不落 `state.json`/keyring）。仅在**手动连接成功**时置 true、**手动断开**时置 false；手动连接**失败**保持
+  false（不触发后台重试）。因此应用重启后意图恒为 false → **开机不自动连接**。自愈重连仅在意图为 true 时发起，
+  且不改变意图（自愈只服务用户既有意图，不擅自建连）。
+- **单飞守卫（修既有竞态，FR-011/012）**：所有 connect/disconnect 经引擎身份守卫串行化——`Connect` 仅在其创建的
+  engine 仍是当前 engine 时才写 `state=Connected`；手动 `Disconnect` 会 nil 掉 engine，使在途的 `Connect` 在握手
+  完成后发现身份不符而**放弃**，杜绝「在途 Connect 复活已被用户拆除的隧道 + 泄漏 device」。**手动断开必胜。**
+- **UI 状态三输入派生（FR-013/014）**：状态指示由 `(state, desiredConnected, connFailed)` 派生。优先级：
+  `Connected`→绿；`Connecting`→黄；`Disconnected && desiredConnected`（自愈重连窗口）→**黄色「连接中…」**且按钮
+  「断开」（**优先且不看 connFailed**，故重试期不误显红色「失败」）；`Disconnected && !desiredConnected &&
+  connFailed`（手动连接失败）→红「失败」；皆否则灰「未连接」。
+- **防火墙镜像（FR-016）**：自愈路径调用与手动路径相同的 `ReconcileFirewall(connected)`，`connected` 取隧道
+  **实际生效态**——重连窗口内链路本就不通 → 防火墙**关闭**，与手动断开期一致；重连成功重新 Connected 才重新打开。
+
 ---
 
 ## 10. 部署与运维

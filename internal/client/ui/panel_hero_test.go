@@ -52,23 +52,23 @@ func TestHeroSwitchReflectsAndWritesFirewall(t *testing.T) {
 }
 
 func TestPrimaryActionAndStatusView(t *testing.T) {
-	if primaryActionLabel(tunnel.Connected) != i18n.T("panel.disconnect") {
+	if primaryActionLabel(tunnel.Connected, false) != i18n.T("panel.disconnect") {
 		t.Error("connected → Disconnect label")
 	}
-	if primaryActionLabel(tunnel.Disconnected) != i18n.T("panel.connect") {
+	if primaryActionLabel(tunnel.Disconnected, false) != i18n.T("panel.connect") {
 		t.Error("disconnected → Connect label")
 	}
 
-	if c, s := statusView(tunnel.Connected, false); s != i18n.T("status.connected") || c != color.Color(successColor) {
+	if c, s := statusView(tunnel.Connected, true, false); s != i18n.T("status.connected") || c != color.Color(successColor) {
 		t.Errorf("connected status = (%v,%q)", c, s)
 	}
-	if c, s := statusView(tunnel.Connecting, false); s != i18n.T("status.connecting") || c != color.Color(warningColor) {
+	if c, s := statusView(tunnel.Connecting, false, false); s != i18n.T("status.connecting") || c != color.Color(warningColor) {
 		t.Errorf("connecting status = (%v,%q)", c, s)
 	}
-	if c, s := statusView(tunnel.Disconnected, true); s != i18n.T("status.failed") || c != color.Color(dangerColor) {
+	if c, s := statusView(tunnel.Disconnected, false, true); s != i18n.T("status.failed") || c != color.Color(dangerColor) {
 		t.Errorf("failed status = (%v,%q), want failed/danger", c, s)
 	}
-	if c, s := statusView(tunnel.Disconnected, false); s != i18n.T("status.disconnected") || c != color.Color(textTertiary) {
+	if c, s := statusView(tunnel.Disconnected, false, false); s != i18n.T("status.disconnected") || c != color.Color(textTertiary) {
 		t.Errorf("disconnected status = (%v,%q)", c, s)
 	}
 }

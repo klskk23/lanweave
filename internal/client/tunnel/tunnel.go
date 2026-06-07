@@ -51,6 +51,7 @@ var (
 type engine interface {
 	up(uapiConfig string, ip netip.Addr, network netip.Prefix) (ifName string, err error)
 	handshaked() (bool, error)
+	lastHandshake() (unixSeconds int64, err error) // 0 = never handshaked; drives staleness
 	transfer() (rx, tx int64, err error)
 	close() error
 }
@@ -60,14 +61,16 @@ type Tunnel struct {
 	rec     state.Record
 	privKey string
 
-	mu     sync.Mutex
-	state  State
-	eng    engine
-	ifName string
+	mu               sync.Mutex
+	state            State
+	eng              engine
+	ifName           string
+	desiredConnected bool // user intent (memory-only, never persisted); gates auto-reconnect
 
 	newEngine      func() engine // injectable for tests; default = wireguard-go
 	connectTimeout time.Duration
 	pollInterval   time.Duration
+	staleThreshold time.Duration // handshake age beyond which the link is "stale" (default 240s)
 }
 
 // New builds a Tunnel from the setup record and the device private key (base64).
@@ -77,6 +80,7 @@ func New(rec state.Record, privKey string) *Tunnel {
 		newEngine:      func() engine { return &wgEngine{} },
 		connectTimeout: 8 * time.Second,
 		pollInterval:   200 * time.Millisecond,
+		staleThreshold: 240 * time.Second,
 	}
 }
 
@@ -92,6 +96,42 @@ func (t *Tunnel) InterfaceName() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.ifName
+}
+
+// SetDesired records the user's connection intent (memory-only, never persisted). The health
+// loop auto-reconnects only while this is true; it is set true on a successful manual connect
+// and false on a manual disconnect, so a fresh process starts "not desired" — no auto-connect
+// at launch (FR-006/FR-007/FR-008).
+func (t *Tunnel) SetDesired(connected bool) {
+	t.mu.Lock()
+	t.desiredConnected = connected
+	t.mu.Unlock()
+}
+
+// Desired reports the user's current connection intent.
+func (t *Tunnel) Desired() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.desiredConnected
+}
+
+// Stale reports whether the live tunnel's last handshake is older than the staleness threshold
+// (default 240s) — i.e. the link silently died. now is injected so the decision is unit-testable
+// without wall-clock sleeps. A tunnel that is down or has never handshaked is not "stale" (that
+// is the connect path's concern, not self-heal's) (FR-002/FR-003).
+func (t *Tunnel) Stale(now time.Time) bool {
+	t.mu.Lock()
+	eng := t.eng
+	threshold := t.staleThreshold
+	t.mu.Unlock()
+	if eng == nil {
+		return false
+	}
+	ts, err := eng.lastHandshake()
+	if err != nil || ts <= 0 {
+		return false
+	}
+	return now.Sub(time.Unix(ts, 0)) > threshold
 }
 
 // Transfer returns this tunnel's cumulative received/sent bytes for the current connection
@@ -158,6 +198,14 @@ func (t *Tunnel) Connect() error {
 	for time.Now().Before(deadline) {
 		if ok, _ := eng.handshaked(); ok {
 			t.mu.Lock()
+			// Single-flight reconcile: if a manual Disconnect tore this attempt down (or a newer
+			// attempt replaced the engine) while we waited for the handshake, honor that — never
+			// revive a tunnel the user already disconnected (FR-011/FR-012). The engine identity
+			// is the source of truth: teardown nils t.eng, so t.eng != eng means "abandon".
+			if t.eng != eng {
+				t.mu.Unlock()
+				return nil
+			}
 			t.state = Connected
 			t.mu.Unlock()
 			return nil
@@ -240,23 +288,62 @@ func (e *wgEngine) up(cfg string, ip netip.Addr, network netip.Prefix) (string, 
 	return name, nil
 }
 
-func (e *wgEngine) handshaked() (bool, error) {
+func (e *wgEngine) lastHandshake() (int64, error) {
 	if e.dev == nil {
-		return false, nil
+		return 0, nil
 	}
 	s, err := e.dev.IpcGet()
 	if err != nil {
-		return false, err
+		return 0, err
 	}
-	for line := range strings.SplitSeq(s, "\n") {
+	ts, _ := parseHandshakeAge(s)
+	return ts, nil
+}
+
+func (e *wgEngine) handshaked() (bool, error) {
+	ts, err := e.lastHandshake()
+	return ts > 0, err
+}
+
+// localPort reports the OS-assigned UDP source port the device bound to. We never write
+// listen_port= into the UAPI config (conn.NewDefaultBind binds port 0), so the kernel hands out
+// a fresh ephemeral port per device; IpcGet echoes the actual bound port back. Exposed for the
+// source-port-randomization regression (FR-017/SC-008); returns 0 if unavailable.
+func (e *wgEngine) localPort() int {
+	if e.dev == nil {
+		return 0
+	}
+	s, err := e.dev.IpcGet()
+	if err != nil {
+		return 0
+	}
+	return parseListenPort(s)
+}
+
+// parseListenPort extracts listen_port= from WireGuard UAPI text (0 if absent). Pure for testing.
+func parseListenPort(uapi string) int {
+	for line := range strings.SplitSeq(uapi, "\n") {
+		if v, ok := strings.CutPrefix(line, "listen_port="); ok {
+			n, _ := strconv.Atoi(strings.TrimSpace(v))
+			return n
+		}
+	}
+	return 0
+}
+
+// parseHandshakeAge extracts the most recent last_handshake_time_sec from WireGuard UAPI text,
+// returning (unixSeconds, ok). A missing field or a 0 value yields (0, false). Pure function so
+// the staleness decision is unit-testable without a real device (FR-001/FR-002).
+func parseHandshakeAge(uapi string) (lastHandshakeUnix int64, ok bool) {
+	for line := range strings.SplitSeq(uapi, "\n") {
 		if v, ok := strings.CutPrefix(line, "last_handshake_time_sec="); ok {
 			n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-			if n > 0 {
-				return true, nil
+			if n > lastHandshakeUnix {
+				lastHandshakeUnix = n
 			}
 		}
 	}
-	return false, nil
+	return lastHandshakeUnix, lastHandshakeUnix > 0
 }
 
 // transfer reports cumulative received/sent bytes by parsing the same dev.IpcGet() UAPI text
