@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"lanweave/internal/server/auth"
 	"lanweave/internal/server/config"
@@ -30,6 +31,9 @@ type handlers struct {
 	// the store, substituting 0 for an admin caller so admin reuses the unlimited path.
 	maxDevicesPerUser    int
 	maxOwnedZonesPerUser int
+	// inviteTTL is the window stamped onto codes minted via createInvite
+	// (0 = never expire).
+	inviteTTL time.Duration
 }
 
 func (h *handlers) serverError(w http.ResponseWriter, err error) {

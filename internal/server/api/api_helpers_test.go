@@ -53,7 +53,11 @@ type harness struct {
 	status  *fakeStatus
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { return newHarnessOpts(t, 0) }
+
+// newHarnessOpts builds a harness whose router stamps newly created invite codes
+// with the given TTL (0 = never expire, matching the zero-value Options default).
+func newHarnessOpts(t *testing.T, inviteTTL time.Duration) *harness {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "db.sqlite"))
 	if err != nil {
@@ -78,12 +82,13 @@ func newHarness(t *testing.T) *harness {
 	jwtMgr := auth.NewJWTManager(harnessJWTSecret, time.Hour)
 	fakeStat := &fakeStatus{handshakes: map[string]time.Time{}}
 	router := api.NewRouter(api.Options{
-		Version: "test",
-		Limiter: rate.NewLimiter(rate.Limit(10000), 10000),
-		Logger:  logger,
-		Store:   st,
-		JWT:     jwtMgr,
-		Status:  fakeStat,
+		Version:   "test",
+		Limiter:   rate.NewLimiter(rate.Limit(10000), 10000),
+		Logger:    logger,
+		Store:     st,
+		JWT:       jwtMgr,
+		Status:    fakeStat,
+		InviteTTL: inviteTTL,
 	})
 	return &harness{t: t, router: router, store: st, jwt: jwtMgr, logBuf: &buf, adminPW: adminPW, status: fakeStat}
 }

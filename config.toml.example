@@ -55,6 +55,10 @@ jwt_secret = "REPLACE_WITH_A_32_BYTE_RANDOM_SECRET"
 # Session token lifetime (Go duration). Tokens are not refreshable or revocable;
 # they simply expire after this long.
 jwt_ttl    = "2h"
+# How long an admin-issued invite code stays redeemable (Go duration). Expiry is
+# enabled out of the box at 24h. Set to "0" (or remove this key) to disable expiry
+# so codes never expire. Already-issued codes are never retroactively expired.
+invite_ttl = "24h"
 
 [admin]
 # First administrator. Created on first start if absent; on later starts an

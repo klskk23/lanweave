@@ -50,19 +50,24 @@ type MeResponse struct {
 	IsAdmin  bool   `json:"is_admin"`
 }
 
-// CreateInviteResponse carries a freshly minted invite code.
+// CreateInviteResponse carries a freshly minted invite code. ExpiresAt is the
+// RFC3339 moment the code stops being redeemable; it is omitted when the code
+// never expires (invite_ttl is 0/empty).
 type CreateInviteResponse struct {
-	Code string `json:"code"`
+	Code      string  `json:"code"`
+	ExpiresAt *string `json:"expires_at,omitempty"`
 }
 
 // InviteListItem is one row of GET /api/v1/admin/invites.
 type InviteListItem struct {
 	Code      string  `json:"code"`
-	Status    string  `json:"status"` // "unused" | "used"
+	Status    string  `json:"status"` // "unused" | "used" | "expired"
 	CreatedBy *string `json:"created_by"`
 	CreatedAt string  `json:"created_at"`
 	UsedBy    *string `json:"used_by"`
 	UsedAt    *string `json:"used_at"`
+	// ExpiresAt is the RFC3339 expiry moment; omitted when the code never expires.
+	ExpiresAt *string `json:"expires_at,omitempty"`
 }
 
 // InviteListResponse wraps the invite list.

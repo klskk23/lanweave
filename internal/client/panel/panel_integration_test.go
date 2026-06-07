@@ -91,7 +91,7 @@ func realServer(t *testing.T) (url string, cert *x509.Certificate, mintInvite fu
 	ts := httptest.NewTLSServer(router)
 	t.Cleanup(ts.Close)
 	return ts.URL, ts.Certificate(), func() string {
-		code, err := st.Invites().Create(ctx, admin.ID)
+		code, _, err := st.Invites().Create(ctx, admin.ID, 0)
 		if err != nil {
 			t.Fatalf("mint invite: %v", err)
 		}

@@ -132,6 +132,12 @@ type NFTablesConfig struct {
 type AuthConfig struct {
 	JWTSecret Secret `toml:"jwt_secret"`
 	JWTTTL    string `toml:"jwt_ttl"`
+	// InviteTTL is how long a newly minted invite code stays redeemable, as a Go
+	// duration string (e.g. "24h"). Unlike JWTTTL it has NO built-in default:
+	// empty/absent means codes never expire (stamped with a NULL expires_at), which
+	// keeps "0/empty = never" literally true and avoids silently expiring codes on
+	// an upgrade that never set the key. The shipped example provides "24h".
+	InviteTTL string `toml:"invite_ttl"`
 }
 
 type AdminConfig struct {
@@ -265,6 +271,16 @@ func (c *Config) Validate() error {
 	}
 	if _, err := time.ParseDuration(c.Auth.JWTTTL); err != nil {
 		errs = append(errs, fmt.Errorf("auth.jwt_ttl %q is not a valid duration: %w", c.Auth.JWTTTL, err))
+	}
+	// invite_ttl has no default: empty means "never expire". A non-empty value must
+	// parse as a duration and must not be negative (a negative window is meaningless
+	// and is rejected rather than silently treated as never-expire).
+	if c.Auth.InviteTTL != "" {
+		if d, err := time.ParseDuration(c.Auth.InviteTTL); err != nil {
+			errs = append(errs, fmt.Errorf("auth.invite_ttl %q is not a valid duration: %w", c.Auth.InviteTTL, err))
+		} else if d < 0 {
+			errs = append(errs, fmt.Errorf("auth.invite_ttl %q must not be negative (0/empty = never expire)", c.Auth.InviteTTL))
+		}
 	}
 
 	if c.Admin.Username == "" {

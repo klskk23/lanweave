@@ -4,6 +4,7 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"golang.org/x/time/rate"
 
@@ -31,6 +32,10 @@ type Options struct {
 	// Options (e.g. a test harness that omits them) reads as unlimited.
 	MaxDevicesPerUser    int
 	MaxOwnedZonesPerUser int
+	// InviteTTL is the already-resolved window stamped onto new invite codes
+	// (0 = never expire). A zero-value Options (e.g. a test harness) issues
+	// never-expiring codes.
+	InviteTTL time.Duration
 }
 
 // NewRouter returns the fully wrapped handler. Middleware order, outermost first:
@@ -48,6 +53,7 @@ func NewRouter(opts Options) http.Handler {
 		status:               opts.Status,
 		maxDevicesPerUser:    opts.MaxDevicesPerUser,
 		maxOwnedZonesPerUser: opts.MaxOwnedZonesPerUser,
+		inviteTTL:            opts.InviteTTL,
 	}
 
 	mux := http.NewServeMux()

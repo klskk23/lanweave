@@ -100,7 +100,7 @@ zone 在服务端落地为 nftables set，是 forward 链上的允许规则。
 | 实体        | 关键字段                                                     | 备注                                          |
 |-------------|--------------------------------------------------------------|-----------------------------------------------|
 | `users`     | id, username UNIQUE, password_hash, is_admin, created_at     | 邀请制注册                                    |
-| `invites`   | id, code UNIQUE, created_by_user_id, used_by_user_id, used_at| 一次性，无过期，`used_at` 非空即作废          |
+| `invites`   | id, code UNIQUE, created_by_user_id, used_by_user_id, used_at, expires_at| 一次性，`used_at` 非空即作废；`expires_at` 可空，NULL=永不过期（slice 026） |
 | `nodes`     | id, user_id, name, wg_pubkey UNIQUE, ip UNIQUE, created_at   | (user_id, name) UNIQUE                        |
 | `zones`     | id, name UNIQUE, password_hash, owner_user_id, created_at    | name 全局唯一                                 |
 | `zone_members` | zone_id, node_id, joined_at                               | 复合主键 (zone_id, node_id)                   |
@@ -194,8 +194,9 @@ table inet lanweave {
 
 ### 7.1 用户来源：邀请制
 - 注册接口要求 `invite_code`。
-- 邀请码：**一次性、无过期、用了作废**。
+- 邀请码：**一次性、用了作废**；可选有效期。
 - 仅 admin 可生成邀请码（API）。
+- 有效期由配置全局值 `auth.invite_ttl`（duration 字符串）控制：建码时写 `expires_at = created_at + invite_ttl`；`0`/空 写 NULL = 永不过期，存量旧码祖父化。注册时过期码归入通用「邀请码无效」错误，不区分过期/不存在/已用（无 oracle）。无 per-code 参数、无后台清理（slice 026）。
 
 ### 7.2 admin bootstrap
 - TOML 中直接定义首位 admin 用户名与**明文**密码。

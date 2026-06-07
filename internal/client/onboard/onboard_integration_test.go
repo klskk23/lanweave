@@ -51,7 +51,7 @@ func realServer(t *testing.T) (url string, cert *x509.Certificate, invite string
 	if err != nil {
 		t.Fatalf("seed admin: %v", err)
 	}
-	code, err := st.Invites().Create(ctx, admin.ID)
+	code, _, err := st.Invites().Create(ctx, admin.ID, 0)
 	if err != nil {
 		t.Fatalf("mint invite: %v", err)
 	}
