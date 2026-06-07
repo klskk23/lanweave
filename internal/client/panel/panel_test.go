@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"lanweave/internal/client/apiclient"
 	"lanweave/internal/client/firewall"
@@ -42,6 +43,11 @@ type fakeAPI struct {
 	createdNodeID int64
 	deletedNodeID int64
 	deleteNodeErr error
+	// deleteNodeErrSeq is consumed one-per-DeleteNode-call (front to back); once exhausted,
+	// DeleteNode falls back to deleteNodeErr. It drives the bounded-retry tests (return
+	// apiclient.ErrUnreachable N times, then a chosen terminal result).
+	deleteNodeErrSeq []error
+	deleteNodeCalls  int
 
 	listNodesErr error
 	tokenSetTo   string
@@ -76,8 +82,17 @@ func (f *fakeAPI) LeaveZone(_ string, nodeID int64) error  { f.joinedNodeID = no
 func (f *fakeAPI) ChangeZonePassword(string, string) error { return nil }
 func (f *fakeAPI) DeleteZone(string) error                 { return nil }
 func (f *fakeAPI) KickMember(_ string, nodeID int64) error { f.kickedNodeID = nodeID; return nil }
-func (f *fakeAPI) DeleteNode(nodeID int64) error           { f.deletedNodeID = nodeID; return f.deleteNodeErr }
-func (f *fakeAPI) Logout() error                           { f.logoutCalls++; return nil }
+func (f *fakeAPI) DeleteNode(nodeID int64) error {
+	f.deletedNodeID = nodeID
+	f.deleteNodeCalls++
+	if len(f.deleteNodeErrSeq) > 0 {
+		err := f.deleteNodeErrSeq[0]
+		f.deleteNodeErrSeq = f.deleteNodeErrSeq[1:]
+		return err
+	}
+	return f.deleteNodeErr
+}
+func (f *fakeAPI) Logout() error { f.logoutCalls++; return nil }
 
 func newController(t *testing.T, f *fakeAPI) (*panel.Controller, *keyring.Fake) {
 	t.Helper()
@@ -218,9 +233,10 @@ func TestLoadSessionTransientError(t *testing.T) {
 	}
 }
 
-// logoutFixture wires a controller with a cached session token, device key, and a real state
-// file so a Logout's local clears are observable.
-func logoutFixture(t *testing.T, f *fakeAPI) (*panel.Controller, *keyring.Fake, string) {
+// logoutFixtureFW wires a controller with a cached session token, refresh token, device key, and
+// a real state file so a Logout's local clears (or their absence) are observable, and exposes the
+// fakeFirewall so tests can assert Clear() fired (done/force) or not (blocked/need-sign-in).
+func logoutFixtureFW(t *testing.T, f *fakeAPI) (*panel.Controller, *keyring.Fake, string, *fakeFirewall) {
 	t.Helper()
 	fk := keyring.NewFake()
 	_ = fk.Set(keyring.SessionTokenName, []byte("tok"))
@@ -231,7 +247,29 @@ func logoutFixture(t *testing.T, f *fakeAPI) (*panel.Controller, *keyring.Fake, 
 		t.Fatal(err)
 	}
 	rec := state.Record{NodeName: "laptop", IP: "100.127.0.2"}
-	return panel.New(f, rec, fk, statePath, false, &fakeFirewall{}), fk, statePath
+	fw := &fakeFirewall{}
+	return panel.New(f, rec, fk, statePath, false, fw), fk, statePath, fw
+}
+
+// logoutFixture is logoutFixtureFW without the firewall handle (for tests that don't inspect it).
+func logoutFixture(t *testing.T, f *fakeAPI) (*panel.Controller, *keyring.Fake, string) {
+	t.Helper()
+	c, fk, sp, _ := logoutFixtureFW(t, f)
+	return c, fk, sp
+}
+
+// assertLocalIntact is the INV-1 inverse of assertLocalCleared: every keyring entry and the state
+// file survive unchanged (used on the blocked / need-sign-in paths, where nothing must mutate).
+func assertLocalIntact(t *testing.T, fk *keyring.Fake, statePath string) {
+	t.Helper()
+	for _, name := range []string{keyring.SessionTokenName, keyring.RefreshTokenName, keyring.DeviceKeyName} {
+		if _, err := fk.Get(name); err != nil {
+			t.Errorf("keyring %q should be intact, got err %v", name, err)
+		}
+	}
+	if !state.Exists(statePath) {
+		t.Error("state file should be intact")
+	}
 }
 
 func assertLocalCleared(t *testing.T, fk *keyring.Fake, statePath string) {
@@ -250,10 +288,12 @@ func assertLocalCleared(t *testing.T, fk *keyring.Fake, statePath string) {
 	}
 }
 
-// TestLogout covers the three outcomes from research D3: the local credentials + state are
-// ALWAYS cleared (FR-005/008), while remoteRemoved reflects whether the server node is gone.
+// TestLogout covers the reachable-server outcomes (slice 025 remote-first flow): a clean delete
+// and a reachable-but-failed delete both reach LogoutDone with local material cleared, but the
+// latter carries the ErrRemoteMayLinger advisory (FR-008/010). The unreachable (block) and
+// already-absent cases have their own dedicated tests below.
 func TestLogout(t *testing.T) {
-	// (a) node present + DeleteNode ok → remoteRemoved=true.
+	// (a) node present + DeleteNode ok → LogoutDone, no linger, RT revoked, local cleared.
 	present := func() *fakeAPI {
 		return &fakeAPI{nodes: protocol.NodeListResponse{Nodes: []protocol.NodeResponse{
 			{ID: 42, Name: "laptop", IP: "100.127.0.2"},
@@ -261,12 +301,12 @@ func TestLogout(t *testing.T) {
 	}
 	f := present()
 	c, fk, sp := logoutFixture(t, f)
-	removed, err := c.Logout()
+	outcome, err := c.Logout()
 	if err != nil {
 		t.Fatalf("logout err: %v", err)
 	}
-	if !removed {
-		t.Error("remoteRemoved = false, want true (delete ok)")
+	if outcome != panel.LogoutDone {
+		t.Errorf("outcome = %v, want LogoutDone (delete ok)", outcome)
 	}
 	if f.deletedNodeID != 42 {
 		t.Errorf("deleted node id = %d, want 42", f.deletedNodeID)
@@ -276,33 +316,136 @@ func TestLogout(t *testing.T) {
 	}
 	assertLocalCleared(t, fk, sp)
 
-	// (b) DeleteNode fails → remoteRemoved=false, local still cleared.
+	// (b) DeleteNode fails with a reachable non-network error → LogoutDone + ErrRemoteMayLinger,
+	// local still cleared (the user is signed out locally; the node may linger server-side).
 	f = present()
-	f.deleteNodeErr = errors.New("boom")
+	f.deleteNodeErr = errors.New("boom") // not ErrUnreachable / not auth
 	c, fk, sp = logoutFixture(t, f)
-	if removed, err := c.Logout(); err != nil || removed {
-		t.Errorf("delete-fail: removed=%v err=%v, want removed=false err=nil", removed, err)
+	outcome, err = c.Logout()
+	if outcome != panel.LogoutDone || !errors.Is(err, panel.ErrRemoteMayLinger) {
+		t.Errorf("reachable delete-fail: outcome=%v err=%v, want LogoutDone + ErrRemoteMayLinger", outcome, err)
 	}
 	assertLocalCleared(t, fk, sp)
 
-	// (c) server unreachable (ListNodes fails) → remoteRemoved=false, local cleared.
-	f = &fakeAPI{listNodesErr: errors.New("network down")}
+	// (c) ListNodes fails with a reachable non-network error → LogoutDone + ErrRemoteMayLinger.
+	f = &fakeAPI{listNodesErr: errors.New("server boom")}
 	c, fk, sp = logoutFixture(t, f)
-	if removed, err := c.Logout(); err != nil || removed {
-		t.Errorf("unreachable: removed=%v err=%v, want removed=false err=nil", removed, err)
+	outcome, err = c.Logout()
+	if outcome != panel.LogoutDone || !errors.Is(err, panel.ErrRemoteMayLinger) {
+		t.Errorf("reachable list-fail: outcome=%v err=%v, want LogoutDone + ErrRemoteMayLinger", outcome, err)
 	}
 	assertLocalCleared(t, fk, sp)
+}
 
-	// (d) node already absent (not in list) → remoteRemoved=true, no DeleteNode call.
-	f = &fakeAPI{nodes: protocol.NodeListResponse{Nodes: []protocol.NodeResponse{
+// presentNode returns a fakeAPI whose node list contains exactly this machine (id 42), so the
+// removal flow resolves an id and proceeds to DeleteNode.
+func presentNode() *fakeAPI {
+	return &fakeAPI{nodes: protocol.NodeListResponse{Nodes: []protocol.NodeResponse{
+		{ID: 42, Name: "laptop", IP: "100.127.0.2"},
+	}}}
+}
+
+// TestLogoutBlockedOnUnreachable (US1, INV-1/INV-4): three ErrUnreachable removal attempts →
+// LogoutBlocked with ZERO local mutation — keyring + state intact, firewall never cleared — and
+// the injected sleep called exactly twice with 1s (no real sleeping).
+func TestLogoutBlockedOnUnreachable(t *testing.T) {
+	f := presentNode()
+	f.deleteNodeErr = apiclient.ErrUnreachable // every attempt is network-unreachable
+	c, fk, sp, fw := logoutFixtureFW(t, f)
+	var sleeps []time.Duration
+	c.SetSleep(func(d time.Duration) { sleeps = append(sleeps, d) })
+
+	outcome, err := c.Logout()
+	if outcome != panel.LogoutBlocked || err != nil {
+		t.Fatalf("outcome=%v err=%v, want LogoutBlocked, nil", outcome, err)
+	}
+	if f.deleteNodeCalls != 3 {
+		t.Errorf("DeleteNode called %d times, want 3 (bounded retry)", f.deleteNodeCalls)
+	}
+	if len(sleeps) != 2 || sleeps[0] != time.Second || sleeps[1] != time.Second {
+		t.Errorf("sleeps = %v, want exactly [1s 1s]", sleeps)
+	}
+	if fw.clearCalls != 0 {
+		t.Errorf("firewall Clear called %d times on a blocked logout, want 0", fw.clearCalls)
+	}
+	if f.logoutCalls != 0 {
+		t.Errorf("api.Logout (RT revoke) called %d times on a blocked logout, want 0", f.logoutCalls)
+	}
+	assertLocalIntact(t, fk, sp)
+}
+
+// TestLogoutRetryBoundedThenSucceeds (US1): ErrUnreachable twice then a successful delete →
+// LogoutDone, sleep called twice, local material cleared.
+func TestLogoutRetryBoundedThenSucceeds(t *testing.T) {
+	f := presentNode()
+	f.deleteNodeErrSeq = []error{apiclient.ErrUnreachable, apiclient.ErrUnreachable} // then nil (success)
+	c, fk, sp, fw := logoutFixtureFW(t, f)
+	var sleeps []time.Duration
+	c.SetSleep(func(d time.Duration) { sleeps = append(sleeps, d) })
+
+	outcome, err := c.Logout()
+	if outcome != panel.LogoutDone || err != nil {
+		t.Fatalf("outcome=%v err=%v, want LogoutDone, nil", outcome, err)
+	}
+	if f.deleteNodeCalls != 3 {
+		t.Errorf("DeleteNode called %d times, want 3 (2 fail + 1 success)", f.deleteNodeCalls)
+	}
+	if len(sleeps) != 2 {
+		t.Errorf("sleeps = %v, want 2", sleeps)
+	}
+	if fw.clearCalls < 1 {
+		t.Error("firewall not cleared on a successful logout")
+	}
+	assertLocalCleared(t, fk, sp)
+}
+
+// TestLogoutAlreadyAbsentIsDone (US2, INV-3): the node is missing from the list → LogoutDone with
+// NO DeleteNode call (never blocked); local material cleared.
+func TestLogoutAlreadyAbsentIsDone(t *testing.T) {
+	f := &fakeAPI{nodes: protocol.NodeListResponse{Nodes: []protocol.NodeResponse{
 		{ID: 5, Name: "someone-else", IP: "100.127.9.9"},
 	}}}
-	c, fk, sp = logoutFixture(t, f)
-	if removed, err := c.Logout(); err != nil || !removed {
-		t.Errorf("already-absent: removed=%v err=%v, want removed=true err=nil", removed, err)
+	c, fk, sp := logoutFixture(t, f)
+	outcome, err := c.Logout()
+	if outcome != panel.LogoutDone || err != nil {
+		t.Errorf("already-absent: outcome=%v err=%v, want LogoutDone, nil", outcome, err)
 	}
-	if f.deletedNodeID != 0 {
-		t.Errorf("DeleteNode should not be called when node already absent; got id %d", f.deletedNodeID)
+	if f.deleteNodeCalls != 0 {
+		t.Errorf("DeleteNode should not be called when node already absent; got %d calls", f.deleteNodeCalls)
+	}
+	assertLocalCleared(t, fk, sp)
+}
+
+// TestLogoutNeedSignInOnRefreshFail (US2 edge, research D7): the (post-lazy-refresh) delete still
+// surfaces ErrSessionExpired → LogoutNeedSignIn with NO local mutation and no firewall clear.
+func TestLogoutNeedSignInOnRefreshFail(t *testing.T) {
+	f := presentNode()
+	f.deleteNodeErr = apiclient.ErrSessionExpired
+	c, fk, sp, fw := logoutFixtureFW(t, f)
+	outcome, err := c.Logout()
+	if outcome != panel.LogoutNeedSignIn || err != nil {
+		t.Fatalf("outcome=%v err=%v, want LogoutNeedSignIn, nil", outcome, err)
+	}
+	if fw.clearCalls != 0 {
+		t.Errorf("firewall Clear called %d times on need-sign-in, want 0", fw.clearCalls)
+	}
+	assertLocalIntact(t, fk, sp)
+}
+
+// TestForceLogoutClearsLocal (US3, INV-5): with the server unreachable, ForceLogout still clears
+// all three keyring entries + state, revokes the RT best-effort, clears the firewall, returns nil.
+func TestForceLogoutClearsLocal(t *testing.T) {
+	f := presentNode()
+	f.deleteNodeErr = apiclient.ErrUnreachable // server unreachable — irrelevant to force teardown
+	c, fk, sp, fw := logoutFixtureFW(t, f)
+	if err := c.ForceLogout(); err != nil {
+		t.Fatalf("ForceLogout err: %v", err)
+	}
+	if fw.clearCalls < 1 {
+		t.Error("ForceLogout should clear the firewall rule")
+	}
+	if f.logoutCalls != 1 {
+		t.Errorf("api.Logout (RT revoke) called %d times, want 1 (best-effort)", f.logoutCalls)
 	}
 	assertLocalCleared(t, fk, sp)
 }

@@ -308,12 +308,12 @@ func TestPanelIntegrationLogout(t *testing.T) {
 	}
 
 	// Log out.
-	remoteRemoved, err := ctrl.Logout()
+	outcome, err := ctrl.Logout()
 	if err != nil {
 		t.Fatalf("logout local clears failed: %v", err)
 	}
-	if !remoteRemoved {
-		t.Error("remoteRemoved = false, want true (server reachable)")
+	if outcome != panel.LogoutDone {
+		t.Errorf("outcome = %v, want LogoutDone (server reachable)", outcome)
 	}
 
 	// Server-side: alice's node is gone (the JWT still works for the read).
@@ -337,6 +337,77 @@ func TestPanelIntegrationLogout(t *testing.T) {
 	}
 	if _, err := keys.Get(keyring.SessionTokenName); !errors.Is(err, keyring.ErrNotFound) {
 		t.Errorf("session token not cleared: %v", err)
+	}
+	if state.Exists(statePath) {
+		t.Error("state file not cleared after logout")
+	}
+}
+
+// TestLogoutCleanRemovesAndRevokes is the US2 end-to-end acceptance test against a real server:
+// a reachable logout removes this device's node, revokes this device's refresh token, and clears
+// all local material → LogoutDone. RT revocation is asserted BEHAVIORALLY (the realServer harness
+// exposes no store): the pre-logout refresh token, replayed on a fresh client after logout, must
+// be rejected (ErrRefreshFailed), proving the server revoked it.
+func TestLogoutCleanRemovesAndRevokes(t *testing.T) {
+	url, cert, mint := realServer(t)
+	pool := trustPool(cert)
+
+	c := apiclient.New(url, apiclient.WithRootCAs(pool))
+	if err := c.Register(mint(), "alice", "password123"); err != nil {
+		t.Fatalf("register alice: %v", err)
+	}
+	if err := c.Login("alice", "password123"); err != nil {
+		t.Fatalf("login alice: %v", err)
+	}
+	k, _ := wgtypes.GeneratePrivateKey()
+	node, err := c.RegisterNode("laptop", k.PublicKey().String())
+	if err != nil {
+		t.Fatalf("register laptop: %v", err)
+	}
+	keys := keyring.NewFake()
+	_ = keys.Set(keyring.DeviceKeyName, []byte(k.String()))
+	_ = keys.Set(keyring.SessionTokenName, []byte(c.Token()))
+	_ = keys.Set(keyring.RefreshTokenName, []byte(c.RefreshToken()))
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	rec := state.Record{ServerURL: url, NodeName: "laptop", IP: node.IP, Network: "100.127.0.0/16"}
+	if err := state.Save(statePath, rec); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	// Capture this device's refresh token BEFORE logout to prove revocation behaviorally after.
+	rtBefore := c.RefreshToken()
+
+	ctrl := panel.New(c, rec, keys, statePath, false, &fakeFirewall{})
+	outcome, err := ctrl.Logout()
+	if err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if outcome != panel.LogoutDone {
+		t.Errorf("outcome = %v, want LogoutDone", outcome)
+	}
+
+	// Node gone server-side (the access token is still valid for this read).
+	list, err := c.ListNodes()
+	if err != nil {
+		t.Fatalf("list nodes after logout: %v", err)
+	}
+	for _, n := range list.Nodes {
+		if n.Name == "laptop" {
+			t.Errorf("node still present after logout: %+v", n)
+		}
+	}
+
+	// RT revoked: a fresh client replaying the pre-logout refresh token cannot renew.
+	fresh := apiclient.New(url, apiclient.WithRootCAs(pool))
+	fresh.SetRefreshToken(rtBefore)
+	if err := fresh.Refresh(); !errors.Is(err, apiclient.ErrRefreshFailed) {
+		t.Errorf("pre-logout refresh token still valid after logout: err=%v, want ErrRefreshFailed", err)
+	}
+
+	// Local material cleared.
+	for _, name := range []string{keyring.SessionTokenName, keyring.RefreshTokenName, keyring.DeviceKeyName} {
+		if _, err := keys.Get(name); !errors.Is(err, keyring.ErrNotFound) {
+			t.Errorf("keyring %q not cleared: %v", name, err)
+		}
 	}
 	if state.Exists(statePath) {
 		t.Error("state file not cleared after logout")

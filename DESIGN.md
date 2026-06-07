@@ -387,6 +387,7 @@ max_owned_zones_per_user = 10   # 同上，仅统计本人创建（拥有）的 
 | TOML 中 admin 明文密码                   | `chmod 600`、不入 git、首次后建议改        |
 | Access JWT 不可吊销                      | 1–2h 短期过期；吊销由 refresh token 层做（`/logout`、删用户级联）；重启换签名密钥仍即时使所有 access token 失效（但客户端可凭 RT 静默续期，不再"全用户被踢"） |
 | 客户端持有一枚长效（30 天滑动）refresh token（slice 024） | 仅存 DPAPI/keyring（非纯文件）；服务端只存 SHA-256 哈希、明文不入库不入日志（仅签发时一次性返回）；可经 `/logout` 或删用户即时吊销；丢失即等价一次 30 天窗口的会话泄露——以短 access TTL + 可吊销 RT 收敛，接受该取舍 |
+| 退出登录可能在服务端残留无人可清的孤儿 node（slice 025 加固，取代 017「离线也能登出、仅警示残留」） | 登出改为**先删远端 node**（控制面走公网 HTTPS，与隧道无关）：网络不可达时 3 次 ×1s 重试仍失败则**阻止登出**并弹两键窗（取消默认 / 强制退出逃生口），零本地改动，避免产生孤儿；reachable 的 5xx/证书变更**不阻止**（回落 017「清本地 + 警示残留」）；登出额外吊销本设备 refresh token（`/logout`）；强制退出接受一枚服务端孤儿 node |
 | 无账户级失败计数（仅全局限流）           | v1.1 补；上线后观察                        |
 | 跳过证书验证（`--insecure` CLI flag） | 仅 troubleshooting，完全不验证；状态于 App Bar overflow 菜单红色项「证书未验证」可见（feature 022：由常驻警示降级为菜单项，已接受的 UX 取舍）；UI 不暴露此开关 |
 | TOFU 信任自签 / 内网证书（feature 018 取代 017 会话级 opt-in） | 首次连接证书过不了系统 CA 时弹窗、显式信任、按 server 持久化叶证书 SHA-256 指纹；验证=指纹或系统 CA；证书变更弹更重警告并阻断、需显式接受；中性「已信任」项于 overflow 菜单（feature 022 改） |
