@@ -203,8 +203,9 @@ Cloud security groups (AWS/GCP/etc.) must allow the same.
 
 Invite codes are minted by an **admin** via the API; the client uses one to register.
 
-1. Use the helper script `/usr/local/bin/lanweave-invite-codegen.sh` (installed by the `.deb`; it
-   logs in as the configured admin and prints a fresh code).
+1. Use the admin helper (installed by the `.deb`): `lanweavectl invite` logs in as the configured
+   admin and prints a fresh code. The same tool also does `lanweavectl user list` and
+   `lanweavectl user del <username>`.
 2. Or mint one manually:
 
    ```sh

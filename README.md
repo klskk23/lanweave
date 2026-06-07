@@ -44,7 +44,8 @@ server runs on Linux as root with a narrowed `CAP_NET_ADMIN`; the client is Wind
   build it with `make deb`. On first install it self-configures and starts `lanweaved.service`.
 - **Windows client**: run the release installer (`lanweave-client-<ver>-setup.exe`), accept the UAC
   prompt, then follow the first-run wizard (server URL → invite code → device name).
-- Get an invite code with `/usr/local/bin/lanweave-invite-codegen.sh` on the server.
+- Manage the server with `lanweavectl` (installed by the `.deb`): `lanweavectl invite` mints an
+  invite code; `lanweavectl user list` / `lanweavectl user del <username>` manage users.
 - Full details (toolchains, ports, hardening, troubleshooting): **[docs/GUIDE.en.md](docs/GUIDE.en.md)**.
 
 ## Documentation

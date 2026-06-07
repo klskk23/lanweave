@@ -11,10 +11,14 @@ description: |
   managed as a systemd service.
 license: proprietary
 
-# openssl is used by the post-install to generate the self-signed certificate and the
-# random per-install secrets, so the service can start out of the box.
+# openssl: post-install generates the self-signed certificate and the random
+#   per-install secrets so the service starts out of the box.
+# jq, sqlite3: used by /usr/local/bin/lanweavectl (admin helper) to talk to the
+#   local API and resolve usernames from the database.
 depends:
   - openssl
+  - jq
+  - sqlite3
 
 contents:
   - src: ./lanweaved
@@ -30,6 +34,10 @@ contents:
     dst: /lib/systemd/system/lanweaved.service
     file_info:
       mode: 0644
+  - src: ./packaging/scripts/lanweavectl.sh
+    dst: /usr/local/bin/lanweavectl
+    file_info:
+      mode: 0755
 
 scripts:
   postinstall: ./packaging/scripts/postinstall.sh

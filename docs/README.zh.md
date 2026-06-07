@@ -38,7 +38,8 @@ root + 收窄的 `CAP_NET_ADMIN` 运行;v1 客户端仅 Windows。
   `make deb` 自构建。首次安装自动配置并启动 `lanweaved.service`。
 - **Windows 客户端**:运行 Release 里的安装器(`lanweave-client-<ver>-setup.exe`),同意 UAC,按首次
   向导走(服务器地址 → 邀请码 → 设备名)。
-- 在服务端用 `/usr/local/bin/lanweave-invite-codegen.sh` 取邀请码。
+- 在服务端用 `lanweavectl`(随 `.deb` 安装)管理:`lanweavectl invite` 生成邀请码;
+  `lanweavectl user list` / `lanweavectl user del <用户名>` 管理用户。
 - 完整细节(工具链、端口、加固、排错)见 **[GUIDE.zh.md](GUIDE.zh.md)**。
 
 ## 文档

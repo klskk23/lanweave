@@ -185,8 +185,9 @@ journalctl -u lanweaved -f      # 跟踪日志
 ### 3.3 获取邀请码
 
 邀请码由**管理员**通过 API 签发,客户端用它注册。
-1. 使用脚本 `/usr/local/bin/lanweave-invite-codegen.sh`
-2. 手动签发
+1. 用管理工具(随 `.deb` 安装):`lanweavectl invite` 以配置的 admin 登录并打印新邀请码。
+   同一工具还能 `lanweavectl user list` 列出用户、`lanweavectl user del <用户名>` 删除用户。
+2. 或手动签发
 
   ```sh
   # 1) 取 admin 密码(首次安装时生成)
