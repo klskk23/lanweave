@@ -13,10 +13,11 @@ import (
 )
 
 var (
-	ErrNodeNameTaken = errors.New("node name already exists for this user")
-	ErrPubKeyTaken   = errors.New("public key already registered")
-	ErrPoolExhausted = errors.New("no addresses available in the pool")
-	ErrNodeNotFound  = errors.New("node not found")
+	ErrNodeNameTaken      = errors.New("node name already exists for this user")
+	ErrPubKeyTaken        = errors.New("public key already registered")
+	ErrPoolExhausted      = errors.New("no addresses available in the pool")
+	ErrNodeNotFound       = errors.New("node not found")
+	ErrDeviceLimitReached = errors.New("device limit reached for this user")
 )
 
 // maxAllocRetries bounds the retry loop when concurrent registrations race for the
@@ -43,7 +44,10 @@ func (s *Store) Nodes() *NodeRepo { return &NodeRepo{db: s.db} }
 // Create allocates the lowest free address in [first, last] and inserts the node.
 // On a concurrent ip collision it retries with the next lowest-free address; name
 // and pubkey conflicts return typed errors; an empty pool returns ErrPoolExhausted.
-func (r *NodeRepo) Create(ctx context.Context, userID int64, name, pubKey string, first, last uint32) (*Node, error) {
+// maxDevices caps how many nodes the user may own: when > 0 the count check is folded
+// into the insert so it is atomic under SQLite's writer lock (a user at the cap yields
+// ErrDeviceLimitReached); maxDevices <= 0 means unlimited (admin or configured 0).
+func (r *NodeRepo) Create(ctx context.Context, userID int64, name, pubKey string, first, last uint32, maxDevices int) (*Node, error) {
 	now := time.Now().UTC().Truncate(time.Second)
 	for range maxAllocRetries {
 		ipVal, ok, err := r.lowestFree(ctx, first, last)
@@ -53,8 +57,7 @@ func (r *NodeRepo) Create(ctx context.Context, userID int64, name, pubKey string
 		if !ok {
 			return nil, ErrPoolExhausted
 		}
-		const q = `INSERT INTO nodes (user_id, name, wg_pubkey, ip, created_at) VALUES (?, ?, ?, ?, ?)`
-		res, err := r.db.ExecContext(ctx, q, userID, name, pubKey, ipVal, now.Format(time.RFC3339))
+		res, err := r.insertNode(ctx, userID, name, pubKey, ipVal, now, maxDevices)
 		if err != nil {
 			switch {
 			case isUniqueViolationOn(err, "nodes.ip"):
@@ -65,6 +68,13 @@ func (r *NodeRepo) Create(ctx context.Context, userID int64, name, pubKey string
 				return nil, ErrNodeNameTaken
 			default:
 				return nil, fmt.Errorf("insert node: %w", err)
+			}
+		}
+		// A capped insert (maxDevices > 0) affects 0 rows when the user is already at
+		// the cap — the count sub-select evaluated false atomically with the insert.
+		if maxDevices > 0 {
+			if n, _ := res.RowsAffected(); n == 0 {
+				return nil, ErrDeviceLimitReached
 			}
 		}
 		id, _ := res.LastInsertId()
@@ -78,6 +88,25 @@ func (r *NodeRepo) Create(ctx context.Context, userID int64, name, pubKey string
 		}, nil
 	}
 	return nil, fmt.Errorf("allocate address: exhausted %d retries under contention", maxAllocRetries)
+}
+
+// insertNode inserts one node row. When maxDevices > 0 it folds an atomic
+// count-and-check into the statement (INSERT … SELECT … WHERE current count < cap),
+// so a user at the cap yields 0 rows affected rather than an over-cap row; maxDevices
+// <= 0 (unlimited / admin) runs the plain unconditional insert. A UNIQUE violation
+// still surfaces as an error in both forms, so the caller's retry/typed-error handling
+// is unchanged.
+func (r *NodeRepo) insertNode(ctx context.Context, userID int64, name, pubKey string, ipVal uint32, now time.Time, maxDevices int) (sql.Result, error) {
+	ts := now.Format(time.RFC3339)
+	if maxDevices > 0 {
+		const q = `
+INSERT INTO nodes (user_id, name, wg_pubkey, ip, created_at)
+SELECT ?, ?, ?, ?, ?
+WHERE (SELECT COUNT(*) FROM nodes WHERE user_id = ?) < ?`
+		return r.db.ExecContext(ctx, q, userID, name, pubKey, ipVal, ts, userID, maxDevices)
+	}
+	const q = `INSERT INTO nodes (user_id, name, wg_pubkey, ip, created_at) VALUES (?, ?, ?, ?, ?)`
+	return r.db.ExecContext(ctx, q, userID, name, pubKey, ipVal, ts)
 }
 
 // lowestFree returns the smallest free address (uint32) in [first, last], or ok=false

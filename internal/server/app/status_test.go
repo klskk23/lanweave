@@ -46,7 +46,7 @@ func TestStatusTrackerReadsRealDevice(t *testing.T) {
 	first, last, _ := ipam.PoolRange("100.127.0.0/16")
 	nodeKey, _ := wgtypes.GeneratePrivateKey()
 	nodePub := nodeKey.PublicKey().String()
-	node, err := st.Nodes().Create(ctx, user.ID, "laptop", nodePub, first, last)
+	node, err := st.Nodes().Create(ctx, user.ID, "laptop", nodePub, first, last, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

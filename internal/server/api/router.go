@@ -26,6 +26,11 @@ type Options struct {
 	NetFW    *netfw.Manager
 	WGConfig config.WireGuardConfig
 	Status   statusProvider
+	// MaxDevicesPerUser / MaxOwnedZonesPerUser are the already-resolved per-user
+	// caps (0 = unlimited). Plain ints, not the config pointer type, so a zero-value
+	// Options (e.g. a test harness that omits them) reads as unlimited.
+	MaxDevicesPerUser    int
+	MaxOwnedZonesPerUser int
 }
 
 // NewRouter returns the fully wrapped handler. Middleware order, outermost first:
@@ -33,14 +38,16 @@ type Options struct {
 // opt into AuthRequired (and AdminRequired) wrappers.
 func NewRouter(opts Options) http.Handler {
 	h := &handlers{
-		store:    opts.Store,
-		jwt:      opts.JWT,
-		log:      opts.Logger,
-		version:  opts.Version,
-		wg:       opts.WG,
-		netfw:    opts.NetFW,
-		wgConfig: opts.WGConfig,
-		status:   opts.Status,
+		store:                opts.Store,
+		jwt:                  opts.JWT,
+		log:                  opts.Logger,
+		version:              opts.Version,
+		wg:                   opts.WG,
+		netfw:                opts.NetFW,
+		wgConfig:             opts.WGConfig,
+		status:               opts.Status,
+		maxDevicesPerUser:    opts.MaxDevicesPerUser,
+		maxOwnedZonesPerUser: opts.MaxOwnedZonesPerUser,
 	}
 
 	mux := http.NewServeMux()

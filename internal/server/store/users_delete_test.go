@@ -22,11 +22,11 @@ func TestUserDeleteCascade(t *testing.T) {
 	n1 := seedNode(t, st, alice, "n1") // 100.127.0.2
 	n2 := seedNode(t, st, alice, "n2") // 100.127.0.3
 
-	az, err := st.Zones().Create(ctx, alice, "az", "hash")
+	az, err := st.Zones().Create(ctx, alice, "az", "hash", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bz, err := st.Zones().Create(ctx, bob, "bz", "hash")
+	bz, err := st.Zones().Create(ctx, bob, "bz", "hash", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

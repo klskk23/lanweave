@@ -12,9 +12,10 @@ import (
 )
 
 var (
-	ErrZoneNameTaken  = errors.New("zone name already exists")
-	ErrZoneOrPassword = errors.New("invalid zone or password")
-	ErrNotMember      = errors.New("node is not a member of the zone")
+	ErrZoneNameTaken         = errors.New("zone name already exists")
+	ErrZoneOrPassword        = errors.New("invalid zone or password")
+	ErrNotMember             = errors.New("node is not a member of the zone")
+	ErrOwnedZoneLimitReached = errors.New("owned-zone limit reached for this user")
 )
 
 type Zone struct {
@@ -52,18 +53,48 @@ type ZoneRepo struct {
 func (s *Store) Zones() *ZoneRepo { return &ZoneRepo{db: s.db} }
 
 // Create inserts a zone owned by ownerID. Returns ErrZoneNameTaken on a name clash.
-func (r *ZoneRepo) Create(ctx context.Context, ownerID int64, name, passwordHash string) (*Zone, error) {
+// maxOwnedZones caps how many zones the owner may create: when > 0 the count check is
+// folded into the insert (atomic under SQLite's writer lock), so an owner at the cap
+// gets ErrOwnedZoneLimitReached; maxOwnedZones <= 0 means unlimited (admin or
+// configured 0). Only owned zones count — joining another user's zone is uncapped and
+// untouched by this method.
+func (r *ZoneRepo) Create(ctx context.Context, ownerID int64, name, passwordHash string, maxOwnedZones int) (*Zone, error) {
 	now := time.Now().UTC().Truncate(time.Second)
-	const q = `INSERT INTO zones (name, password_hash, owner_user_id, created_at) VALUES (?, ?, ?, ?)`
-	res, err := r.db.ExecContext(ctx, q, name, passwordHash, ownerID, now.Format(time.RFC3339))
+	res, err := r.insertZone(ctx, ownerID, name, passwordHash, now, maxOwnedZones)
 	if err != nil {
 		if isUniqueViolationOn(err, "zones.name") {
 			return nil, ErrZoneNameTaken
 		}
 		return nil, fmt.Errorf("create zone: %w", err)
 	}
+	// A capped insert (maxOwnedZones > 0) affects 0 rows when the owner is at the cap;
+	// the count sub-select evaluated false atomically with the insert. This is decided
+	// before any name UNIQUE check, so a capped owner is refused with the limit error
+	// even when the chosen name is also taken (both are distinguishable to the caller).
+	if maxOwnedZones > 0 {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, ErrOwnedZoneLimitReached
+		}
+	}
 	id, _ := res.LastInsertId()
 	return &Zone{ID: id, Name: name, PasswordHash: passwordHash, OwnerID: ownerID, CreatedAt: now}, nil
+}
+
+// insertZone inserts one zone row. When maxOwnedZones > 0 it folds an atomic
+// count-and-check into the statement (INSERT … SELECT … WHERE owned count < cap), so an
+// owner at the cap yields 0 rows affected; maxOwnedZones <= 0 runs the plain
+// unconditional insert. A name UNIQUE violation surfaces as an error in both forms.
+func (r *ZoneRepo) insertZone(ctx context.Context, ownerID int64, name, passwordHash string, now time.Time, maxOwnedZones int) (sql.Result, error) {
+	ts := now.Format(time.RFC3339)
+	if maxOwnedZones > 0 {
+		const q = `
+INSERT INTO zones (name, password_hash, owner_user_id, created_at)
+SELECT ?, ?, ?, ?
+WHERE (SELECT COUNT(*) FROM zones WHERE owner_user_id = ?) < ?`
+		return r.db.ExecContext(ctx, q, name, passwordHash, ownerID, ts, ownerID, maxOwnedZones)
+	}
+	const q = `INSERT INTO zones (name, password_hash, owner_user_id, created_at) VALUES (?, ?, ?, ?)`
+	return r.db.ExecContext(ctx, q, name, passwordHash, ownerID, ts)
 }
 
 // UpdatePassword changes only the stored hash. Existing memberships and isolation

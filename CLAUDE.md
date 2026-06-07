@@ -1,6 +1,6 @@
 使用中文对话
 <!-- SPECKIT START -->
-Active feature plan: specs/022-client-ui-redesign/plan.md
+Active feature plan: specs/023-per-user-limits/plan.md
 
 Project-wide design is frozen in DESIGN.md; slice list is in docs/ROADMAP.md;
 governing principles are in .specify/memory/constitution.md. For the current

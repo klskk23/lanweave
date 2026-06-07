@@ -1,6 +1,6 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化），021 为服务端可选明文 HTTP 监听（供反向代理终止 TLS），022 为客户端主页面与 Wizard 视觉改版（按 `UI-DESIGN.md`/`UI-example.png`，Material 3 启发的深色 flat 风格）。
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化），021 为服务端可选明文 HTTP 监听（供反向代理终止 TLS），022 为客户端主页面与 Wizard 视觉改版（按 `UI-DESIGN.md`/`UI-example.png`，Material 3 启发的深色 flat 风格）；023 为每用户设备 / 拥有-zone 配额上限（配置文件全局值，默认各 10，0=无限制，admin 豁免）。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -33,6 +33,7 @@
 | 020 | client-i18n ✅                           | 客户端     | 009, 011   | 客户端 UI 中/英双语,启动按系统语言,可手动切换(重启生效) |
 | 021 | server-http-mode ✅                      | 服务端     | 001        | 服务端可配 tls=false 监听明文 HTTP(供反代终止 TLS);默认仍 HTTPS,缺 cert 仍硬失败,现存配置不降级 |
 | 022 | client-ui-redesign                      | 客户端     | 010, 011, 020 | 主页面+Wizard 按 UI-DESIGN.md/UI-example.png 重做(Material 3 深色 flat):自定义主题/App Bar+overflow/Hero 卡片/列表 avatar+状态点/Switch/区域详情页/流量计数;Wizard 仅套主题,客户端行为零回归 |
+| 023 | per-user-limits ✅                       | 服务端/客户端 | 002, 004, 005, 020 | 每用户设备数 + 拥有-zone 数配额(配置全局值,默认各 10,0=无限,admin 豁免);超限 409,删除释放名额,下调上限只挡新增 |
 
 ---
 
@@ -505,6 +506,37 @@
 
 **依赖 / 关联**
 - 011（主面板）、020（i18n，新文案走双语）、010（隧道连接状态 + 流量字节计数）。
+
+---
+
+### 023 — per-user-limits
+**背景**
+- 服务端对每用户可创建的设备（node）与可拥有（创建）的 zone 数量无任何上限，单账号可无限注册 node / 建 zone，缺一道防滥用与容量保护。
+- 需求：配置文件加两个全局上限，默认各 10，对所有普通用户一视同仁；admin 豁免。
+
+**范围**
+- **配置（全局统一值）**：新增 `[limits]` 段，`max_devices` / `max_zones` 两字段，类型 `*int`（区分「未写」与「显式 0」）。`applyDefaults`：`nil` → 10；`Validate`：负数报错，**0 合法 = 无限制**，正数 = 该上限。常量 `defaultUserLimit = 10`。
+- **计数语义**：设备 = 该用户当前存在的 node 数（`nodes.user_id`，删 node 释放名额）；zone = 该用户当前**拥有**的 zone 数（`zones.owner_user_id`，删 zone 释放；**join 他人 zone 不计、不受限**）。
+- **强制（store 层事务内，并发不越界）**：`Nodes().Create` / `Zones().Create` 各多收一个 `limit int`，在同一事务内先 `SELECT COUNT(...)` 再 `INSERT`，超限返回新哨兵 `ErrDeviceLimit` / `ErrZoneLimit`；`limit == 0` 跳过检查（= 无限）。强制点：`registerNode`（设备）、`createZone`（zone）。
+- **admin 豁免**：handler 取 `id.IsAdmin`（已在 JWT claims），admin 时把有效 limit 当 0 传入 —— 复用「0 = 无限」一套机制，无额外特例分支。
+- **错误返回**：HTTP **409**，错误码 `device_limit_reached` / `zone_limit_reached`；`apiclient` 新增 `ErrDeviceLimit` / `ErrZoneLimit` 哨兵按 code 映射；i18n 新增 `wizard.errDeviceLimit`（设备超限在 wizard 设备注册步）、`panel.errZoneLimit`（zone 超限在 panel 创建流）zh-Hans + en 双语。
+- **Grandfathering**：运维下调上限到低于现有数量时，**只挡新增、不驱逐**已有；用户降到上限以下前无法再创建。
+
+**验收**
+- 默认 10：普通用户建到第 11 个 node / owned zone 被拒 409；admin 不受限可继续；`max_devices=0` / `max_zones=0` 视为无限；缺省 key → 10；负数配置启动校验失败。
+- 删 node / 删 zone 后名额释放，可再创建至上限。
+- 下调上限低于现有数 → 已有不动、新增被挡（grandfather）。
+- 服务端集成测试（真 SQLite，`unshare -rUn`，宪法 II 不 mock）：设备 / zone 超限、admin 豁免、`0`=无限、grandfather 各 ≥1 例；并发不越界可加一条。
+- `apiclient` + fake 边界 headless 测覆盖错误码 → 哨兵映射。
+
+**不做**
+- 按用户单独配置上限（本期全局统一值，留 v1.1+）。
+- 限制 join 他人 zone 的数量（只数 owned zone）。
+- 「历史累计注册数」式防滥用（删除即释放名额）。
+- 运行时改配置热加载（沿用启动加载）。
+
+**依赖 / 关联**
+- 004（node 注册强制点）、005（zone 创建 / owner 计数）、002（JWT `IsAdmin` claim 供豁免）、020（i18n 新文案走双语）。
 
 ---
 

@@ -23,24 +23,26 @@ import (
 
 // Typed errors surfaced to the onboarding flow / UI.
 var (
-	ErrUnreachable   = errors.New("server unreachable")
-	ErrUntrustedCert = errors.New("server certificate not trusted")
-	ErrCertChanged   = errors.New("server certificate changed")
-	ErrAuthFailed    = errors.New("sign-in failed")
-	ErrInviteInvalid = errors.New("invite code invalid or already used")
-	ErrUsernameTaken = errors.New("username already taken")
-	ErrNodeNameTaken = errors.New("device name already taken")
-	ErrPubKeyTaken   = errors.New("device key already registered")
-	ErrPoolExhausted = errors.New("no addresses available")
-	ErrServer        = errors.New("server error")
+	ErrUnreachable        = errors.New("server unreachable")
+	ErrUntrustedCert      = errors.New("server certificate not trusted")
+	ErrCertChanged        = errors.New("server certificate changed")
+	ErrAuthFailed         = errors.New("sign-in failed")
+	ErrInviteInvalid      = errors.New("invite code invalid or already used")
+	ErrUsernameTaken      = errors.New("username already taken")
+	ErrNodeNameTaken      = errors.New("device name already taken")
+	ErrPubKeyTaken        = errors.New("device key already registered")
+	ErrPoolExhausted      = errors.New("no addresses available")
+	ErrDeviceLimitReached = errors.New("device limit reached")
+	ErrServer             = errors.New("server error")
 
 	// Zone/session errors (feature 011).
-	ErrSessionExpired = errors.New("session expired")
-	ErrZoneNameTaken  = errors.New("zone name already taken")
-	ErrZoneOrPassword = errors.New("invalid zone or password")
-	ErrNotOwner       = errors.New("only the zone owner can do that")
-	ErrNotMember      = errors.New("not a member of that zone")
-	ErrZoneNotFound   = errors.New("zone not found")
+	ErrSessionExpired        = errors.New("session expired")
+	ErrZoneNameTaken         = errors.New("zone name already taken")
+	ErrOwnedZoneLimitReached = errors.New("owned-zone limit reached")
+	ErrZoneOrPassword        = errors.New("invalid zone or password")
+	ErrNotOwner              = errors.New("only the zone owner can do that")
+	ErrNotMember             = errors.New("not a member of that zone")
+	ErrZoneNotFound          = errors.New("zone not found")
 )
 
 // CertError reports a TLS certificate that neither matched the configured pin nor verified
@@ -334,8 +336,12 @@ func (c *Client) mapError(path string, auth bool, resp *http.Response) error {
 		return ErrPubKeyTaken
 	case "pool_exhausted":
 		return ErrPoolExhausted
+	case "device_limit_reached":
+		return ErrDeviceLimitReached
 	case "zone_name_taken":
 		return ErrZoneNameTaken
+	case "zone_limit_reached":
+		return ErrOwnedZoneLimitReached
 	case "invalid_zone_or_password":
 		return ErrZoneOrPassword
 	case "forbidden":

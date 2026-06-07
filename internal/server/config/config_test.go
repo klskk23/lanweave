@@ -164,6 +164,97 @@ password = "supersecret"
 	return path
 }
 
+// writeLimitsConfig writes a minimal valid config, inserting limitsBlock as the body
+// of a [limits] section (pass "" to omit the section entirely). Returns the path.
+func writeLimitsConfig(t *testing.T, limitsBlock string) string {
+	t.Helper()
+	dir := t.TempDir()
+	cert, key, err := testutil.WriteSelfSignedCert(dir)
+	if err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	limits := ""
+	if limitsBlock != "" {
+		limits = "\n[limits]\n" + limitsBlock + "\n"
+	}
+	toml := `
+[server]
+listen = "127.0.0.1:8443"
+tls_cert = "` + cert + `"
+tls_key = "` + key + `"
+data_dir = "` + dir + `"
+
+[wireguard]
+network = "100.127.0.0/16"
+endpoint = "vpn.example.com:51820"
+
+[auth]
+jwt_secret = "0123456789abcdef0123456789abcdef"
+
+[admin]
+username = "admin"
+password = "supersecret"
+` + limits
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(toml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestLimitsConfigThreeState proves the per-user caps mirror the TLS three-state:
+// absent → default 10, explicit 0 preserved (unlimited), negative rejected at startup
+// (FR-002/007/008, US3).
+func TestLimitsConfigThreeState(t *testing.T) {
+	// (a) [limits] absent → both default to 10 after Load/applyDefaults.
+	c, err := config.Load(writeLimitsConfig(t, ""))
+	if err != nil {
+		t.Fatalf("load absent: %v", err)
+	}
+	if got := c.Limits.MaxDevicesPerUser; got == nil || *got != 10 {
+		t.Fatalf("absent device cap: got %v, want 10", got)
+	}
+	if got := c.Limits.MaxOwnedZonesPerUser; got == nil || *got != 10 {
+		t.Fatalf("absent zone cap: got %v, want 10", got)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("default caps should validate: %v", err)
+	}
+
+	// (b) explicit 0 is preserved (unlimited), not re-defaulted to 10.
+	c, err = config.Load(writeLimitsConfig(t, "max_devices_per_user = 0\nmax_owned_zones_per_user = 0"))
+	if err != nil {
+		t.Fatalf("load zero: %v", err)
+	}
+	if *c.Limits.MaxDevicesPerUser != 0 || *c.Limits.MaxOwnedZonesPerUser != 0 {
+		t.Fatalf("explicit 0 not preserved: %d/%d", *c.Limits.MaxDevicesPerUser, *c.Limits.MaxOwnedZonesPerUser)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("zero caps should validate (0 = unlimited): %v", err)
+	}
+
+	// (c) negative → Validate error naming the field; the server refuses to start.
+	c, err = config.Load(writeLimitsConfig(t, "max_devices_per_user = -1"))
+	if err != nil {
+		t.Fatalf("load negative: %v", err)
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "limits.max_devices_per_user") {
+		t.Fatalf("negative cap: got %v, want error naming limits.max_devices_per_user", err)
+	}
+
+	// (d) a valid positive config validates clean and keeps its values.
+	c, err = config.Load(writeLimitsConfig(t, "max_devices_per_user = 3\nmax_owned_zones_per_user = 5"))
+	if err != nil {
+		t.Fatalf("load positive: %v", err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("positive caps should validate: %v", err)
+	}
+	if *c.Limits.MaxDevicesPerUser != 3 || *c.Limits.MaxOwnedZonesPerUser != 5 {
+		t.Fatalf("positive caps = %d/%d, want 3/5", *c.Limits.MaxDevicesPerUser, *c.Limits.MaxOwnedZonesPerUser)
+	}
+}
+
 // TestTLSEnabledThreeState proves the tls toggle distinguishes "unset" (HTTPS,
 // safe default) from explicit false (plaintext) — the FR-002 no-downgrade
 // invariant. A bare bool would collapse unset and false; *bool keeps them apart.

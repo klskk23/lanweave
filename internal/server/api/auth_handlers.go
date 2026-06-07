@@ -26,6 +26,10 @@ type handlers struct {
 	netfw    *netfw.Manager
 	wgConfig config.WireGuardConfig
 	status   statusProvider
+	// Resolved per-user caps (0 = unlimited). registerNode/createZone pass these to
+	// the store, substituting 0 for an admin caller so admin reuses the unlimited path.
+	maxDevicesPerUser    int
+	maxOwnedZonesPerUser int
 }
 
 func (h *handlers) serverError(w http.ResponseWriter, err error) {

@@ -733,6 +733,8 @@ func panelMessage(err error) string {
 		return i18n.T("panel.errSessionExpired")
 	case errors.Is(err, apiclient.ErrZoneNameTaken):
 		return i18n.T("panel.errZoneNameTaken")
+	case errors.Is(err, apiclient.ErrOwnedZoneLimitReached):
+		return i18n.T("panel.errZoneLimit")
 	case errors.Is(err, apiclient.ErrZoneOrPassword):
 		return i18n.T("panel.errZoneOrPassword")
 	case errors.Is(err, apiclient.ErrNotOwner):

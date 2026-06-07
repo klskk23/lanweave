@@ -104,15 +104,17 @@ func Run(ctx context.Context, opts Options) error {
 
 	limiter := rate.NewLimiter(rate.Limit(cfg.RateLimit.RPS), cfg.RateLimit.Burst)
 	handler := api.NewRouter(api.Options{
-		Version:  opts.Version,
-		WG:       wgServer,
-		NetFW:    nftMgr,
-		WGConfig: cfg.WireGuard,
-		Status:   onlineTracker,
-		Limiter:  limiter,
-		Logger:   log,
-		Store:    st,
-		JWT:      jwtMgr,
+		Version:              opts.Version,
+		WG:                   wgServer,
+		NetFW:                nftMgr,
+		WGConfig:             cfg.WireGuard,
+		Status:               onlineTracker,
+		Limiter:              limiter,
+		Logger:               log,
+		Store:                st,
+		JWT:                  jwtMgr,
+		MaxDevicesPerUser:    *cfg.Limits.MaxDevicesPerUser,
+		MaxOwnedZonesPerUser: *cfg.Limits.MaxOwnedZonesPerUser,
 	})
 
 	srv := &http.Server{

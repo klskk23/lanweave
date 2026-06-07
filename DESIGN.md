@@ -352,6 +352,10 @@ jwt_ttl    = "2h"
 [admin]
 username = "alice"
 password = "ChangeMeOnFirstLogin!"  # 明文，首次启动后建议改并重启
+
+[limits]
+max_devices_per_user     = 10   # 缺省 10；0 = 无限；负数 = 启动报错。admin 不受限。
+max_owned_zones_per_user = 10   # 同上，仅统计本人创建（拥有）的 zone；加入他人 zone 不计入。
 ```
 
 ### 10.4 systemd unit 要点

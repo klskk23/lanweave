@@ -43,10 +43,10 @@ func TestRebuildNodePeers(t *testing.T) {
 	first, last, _ := ipam.PoolRange("100.127.0.0/16")
 	k1, _ := wgtypes.GeneratePrivateKey()
 	k2, _ := wgtypes.GeneratePrivateKey()
-	if _, err := st.Nodes().Create(ctx, user.ID, "n1", k1.PublicKey().String(), first, last); err != nil {
+	if _, err := st.Nodes().Create(ctx, user.ID, "n1", k1.PublicKey().String(), first, last, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Nodes().Create(ctx, user.ID, "n2", k2.PublicKey().String(), first, last); err != nil {
+	if _, err := st.Nodes().Create(ctx, user.ID, "n2", k2.PublicKey().String(), first, last, 0); err != nil {
 		t.Fatal(err)
 	}
 

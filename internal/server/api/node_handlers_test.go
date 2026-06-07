@@ -44,9 +44,14 @@ type nodeHarness struct {
 	nftName string
 }
 
-// newNodeHarness builds a real WireGuard interface + router. Registration adds a
-// real peer, so this is a privileged integration harness (root / `unshare -rUn`).
-func newNodeHarness(t *testing.T) *nodeHarness {
+// newNodeHarness builds a real WireGuard interface + router with no per-user caps.
+// Registration adds a real peer, so this is a privileged integration harness (root /
+// `unshare -rUn`).
+func newNodeHarness(t *testing.T) *nodeHarness { return newNodeHarnessLimited(t, 0, 0) }
+
+// newNodeHarnessLimited is newNodeHarness with explicit per-user caps wired into the
+// router (0 = unlimited), so cap-enforcement acceptance tests can drive the limits.
+func newNodeHarnessLimited(t *testing.T, maxDevices, maxOwnedZones int) *nodeHarness {
 	t.Helper()
 	testutil.RequireNetAdmin(t)
 
@@ -95,7 +100,9 @@ func newNodeHarness(t *testing.T) *nodeHarness {
 		Version: "test", Limiter: rate.NewLimiter(rate.Limit(10000), 10000),
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Store:  st, JWT: jwtMgr, WG: srv, NetFW: mgr, WGConfig: wgCfg,
-		Status: &fakeStatus{handshakes: map[string]time.Time{}},
+		Status:               &fakeStatus{handshakes: map[string]time.Time{}},
+		MaxDevicesPerUser:    maxDevices,
+		MaxOwnedZonesPerUser: maxOwnedZones,
 	})
 	return &nodeHarness{t: t, router: router, store: st, jwt: jwtMgr, wgName: wgName, wgCfg: wgCfg, nftName: nftName}
 }
@@ -263,6 +270,79 @@ func TestRegisterNodeValidationAndConflicts(t *testing.T) {
 	}
 }
 
+// US1 (023) — device cap end to end: a regular user is refused at the cap with no node
+// created, allowed one below, and a delete frees exactly one slot (FR-003/005, SC-001/003).
+func TestRegisterNodeDeviceLimit(t *testing.T) {
+	h := newNodeHarnessLimited(t, 2, 0)
+	tok := h.token(h.seedUser("alice"))
+
+	for i := range 2 {
+		if r := h.req(http.MethodPost, "/api/v1/nodes", tok, protocol.RegisterNodeRequest{Name: fmt.Sprintf("d%d", i), WGPubKey: nodePubKey(t)}); r.Code != http.StatusCreated {
+			t.Fatalf("register %d (under cap): status %d %s", i, r.Code, r.Body.String())
+		}
+	}
+	// At the cap → 409 device_limit_reached, nothing created.
+	rec := h.req(http.MethodPost, "/api/v1/nodes", tok, protocol.RegisterNodeRequest{Name: "over", WGPubKey: nodePubKey(t)})
+	if rec.Code != http.StatusConflict || decodeError(t, rec).Error != "device_limit_reached" {
+		t.Fatalf("at cap: status %d body %s", rec.Code, rec.Body.String())
+	}
+	var list protocol.NodeListResponse
+	decodeJSONBody(t, h.req(http.MethodGet, "/api/v1/nodes", tok, nil).Body.Bytes(), &list)
+	if len(list.Nodes) != 2 {
+		t.Fatalf("after refusal: %d nodes, want 2 (nothing created)", len(list.Nodes))
+	}
+	// Delete one → a slot frees; the next register succeeds again.
+	idPath := "/api/v1/nodes/" + strconv.FormatInt(list.Nodes[0].ID, 10)
+	if r := h.req(http.MethodDelete, idPath, tok, nil); r.Code != http.StatusNoContent {
+		t.Fatalf("delete: status %d", r.Code)
+	}
+	if r := h.req(http.MethodPost, "/api/v1/nodes", tok, protocol.RegisterNodeRequest{Name: "fresh", WGPubKey: nodePubKey(t)}); r.Code != http.StatusCreated {
+		t.Fatalf("register after delete: status %d %s", r.Code, r.Body.String())
+	}
+}
+
+// US3 (023) — the admin account is exempt from the device cap (SC-008).
+func TestRegisterNodeAdminExempt(t *testing.T) {
+	h := newNodeHarnessLimited(t, 1, 0) // a tiny positive cap
+	adminTok := h.adminToken(h.seedUser("admin"))
+	for i := range 3 { // well past the cap of 1
+		if r := h.req(http.MethodPost, "/api/v1/nodes", adminTok, protocol.RegisterNodeRequest{Name: fmt.Sprintf("d%d", i), WGPubKey: nodePubKey(t)}); r.Code != http.StatusCreated {
+			t.Fatalf("admin register %d should bypass the cap: status %d %s", i, r.Code, r.Body.String())
+		}
+	}
+}
+
+// US3 (023) — grandfathering: a cap lowered below a user's current count keeps every
+// existing device listed and usable; only new registration is refused (FR-010, SC-009).
+func TestRegisterNodeGrandfathering(t *testing.T) {
+	h := newNodeHarnessLimited(t, 2, 0) // cap is now 2...
+	uid := h.seedUser("alice")
+	tok := h.token(uid)
+	// ...but seed 4 devices directly, as if registered under an earlier, higher cap.
+	first, last, _ := ipam.PoolRange("100.127.0.0/16")
+	for i := range 4 {
+		if _, err := h.store.Nodes().Create(context.Background(), uid, fmt.Sprintf("old%d", i), nodePubKey(t), first, last, 0); err != nil {
+			t.Fatalf("seed pre-existing device %d: %v", i, err)
+		}
+	}
+	// All pre-existing devices remain listed (nothing evicted).
+	var list protocol.NodeListResponse
+	decodeJSONBody(t, h.req(http.MethodGet, "/api/v1/nodes", tok, nil).Body.Bytes(), &list)
+	if len(list.Nodes) != 4 {
+		t.Fatalf("grandfathered list = %d, want 4 (nothing evicted)", len(list.Nodes))
+	}
+	// New registration is refused until the count drops below the cap.
+	rec := h.req(http.MethodPost, "/api/v1/nodes", tok, protocol.RegisterNodeRequest{Name: "new", WGPubKey: nodePubKey(t)})
+	if rec.Code != http.StatusConflict || decodeError(t, rec).Error != "device_limit_reached" {
+		t.Fatalf("over-cap register: status %d body %s", rec.Code, rec.Body.String())
+	}
+	// The refusal removed nothing.
+	decodeJSONBody(t, h.req(http.MethodGet, "/api/v1/nodes", tok, nil).Body.Bytes(), &list)
+	if len(list.Nodes) != 4 {
+		t.Errorf("after refusal: %d devices, want 4", len(list.Nodes))
+	}
+}
+
 func TestNodeAuthRequired(t *testing.T) {
 	h := newNodeHarness(t)
 	for _, tc := range []struct{ method, path string }{
@@ -315,10 +395,10 @@ func TestListNodesOnlineStatus(t *testing.T) {
 	}
 	onlinePub := nodePubKey(t)
 	neverPub := nodePubKey(t)
-	if _, err := h.store.Nodes().Create(ctx, u.ID, "connected", onlinePub, first, last); err != nil {
+	if _, err := h.store.Nodes().Create(ctx, u.ID, "connected", onlinePub, first, last, 0); err != nil {
 		t.Fatalf("seed connected node: %v", err)
 	}
-	if _, err := h.store.Nodes().Create(ctx, u.ID, "never", neverPub, first, last); err != nil {
+	if _, err := h.store.Nodes().Create(ctx, u.ID, "never", neverPub, first, last, 0); err != nil {
 		t.Fatalf("seed never node: %v", err)
 	}
 	// connected handshaked just now → online; "never" is absent from the snapshot.

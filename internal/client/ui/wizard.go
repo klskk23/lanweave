@@ -221,7 +221,7 @@ func (z *Wizard) runProvision() {
 				}
 				dialog.ShowError(errors.New(friendly(err)), z.win)
 				switch {
-				case errors.Is(err, apiclient.ErrNodeNameTaken):
+				case errors.Is(err, apiclient.ErrNodeNameTaken), errors.Is(err, apiclient.ErrDeviceLimitReached):
 					z.stepName()
 				case errors.Is(err, apiclient.ErrAuthFailed), errors.Is(err, apiclient.ErrInviteInvalid), errors.Is(err, apiclient.ErrUsernameTaken):
 					z.stepAuth()
@@ -316,6 +316,8 @@ func friendly(err error) string {
 		return i18n.T("wizard.errUsernameTaken")
 	case errors.Is(err, apiclient.ErrNodeNameTaken):
 		return i18n.T("wizard.errNodeNameTaken")
+	case errors.Is(err, apiclient.ErrDeviceLimitReached):
+		return i18n.T("wizard.errDeviceLimit")
 	case errors.Is(err, apiclient.ErrUnreachable):
 		return i18n.T("wizard.errUnreachable")
 	case errors.Is(err, apiclient.ErrUntrustedCert):

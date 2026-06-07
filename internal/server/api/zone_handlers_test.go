@@ -36,9 +36,14 @@ type zoneHarness struct {
 	table  string
 }
 
-// newZoneHarness builds a router with a real nftables table (create/join mutate it),
-// so this is a privileged integration harness (root / `unshare -rUn`).
-func newZoneHarness(t *testing.T) *zoneHarness {
+// newZoneHarness builds a router with a real nftables table (create/join mutate it)
+// and no per-user caps, so this is a privileged integration harness (root /
+// `unshare -rUn`).
+func newZoneHarness(t *testing.T) *zoneHarness { return newZoneHarnessLimited(t, 0, 0) }
+
+// newZoneHarnessLimited is newZoneHarness with explicit per-user caps wired into the
+// router (0 = unlimited), so owned-zone-cap acceptance tests can drive the limits.
+func newZoneHarnessLimited(t *testing.T, maxDevices, maxOwnedZones int) *zoneHarness {
 	t.Helper()
 	testutil.RequireNetAdmin(t)
 
@@ -70,7 +75,9 @@ func newZoneHarness(t *testing.T) *zoneHarness {
 		Version: "test", Limiter: rate.NewLimiter(rate.Limit(10000), 10000),
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Store:  st, JWT: jwtMgr, NetFW: mgr,
-		Status: &fakeStatus{handshakes: map[string]time.Time{}},
+		Status:               &fakeStatus{handshakes: map[string]time.Time{}},
+		MaxDevicesPerUser:    maxDevices,
+		MaxOwnedZonesPerUser: maxOwnedZones,
 	})
 	return &zoneHarness{t: t, router: router, store: st, jwt: jwtMgr, table: table}
 }
@@ -85,11 +92,23 @@ func (h *zoneHarness) user(name string) (int64, string) {
 	return u.ID, tok
 }
 
+// adminUser seeds an account and returns an admin JWT for it (user() issues non-admin
+// tokens). Used to assert the admin cap exemption.
+func (h *zoneHarness) adminUser(name string) (int64, string) {
+	h.t.Helper()
+	u, err := h.store.Users().CreateAdmin(context.Background(), name, "hash")
+	if err != nil {
+		h.t.Fatalf("seed admin user: %v", err)
+	}
+	tok, _ := h.jwt.Issue(auth.Claims{UserID: u.ID, Username: name, IsAdmin: true})
+	return u.ID, tok
+}
+
 func (h *zoneHarness) seedNode(userID int64, name string) *store.Node {
 	h.t.Helper()
 	first, last, _ := ipam.PoolRange("100.127.0.0/16")
 	k := nodePubKey(h.t)
-	n, err := h.store.Nodes().Create(context.Background(), userID, name, k, first, last)
+	n, err := h.store.Nodes().Create(context.Background(), userID, name, k, first, last, 0)
 	if err != nil {
 		h.t.Fatalf("seed node: %v", err)
 	}
@@ -137,6 +156,60 @@ func (h *zoneHarness) setExists(zoneID int64) bool {
 	conn, _ := nftables.New()
 	_, err := conn.GetSetByName(&nftables.Table{Family: nftables.TableFamilyINet, Name: h.table}, fmt.Sprintf("zone_%d", zoneID))
 	return err == nil
+}
+
+// US2 (023) — owned-zone cap end to end: refused at the cap with no zone created,
+// allowed one below, a delete frees a slot, and joining another user's zone while at
+// the cap still succeeds (FR-004/006, SC-002/004).
+func TestCreateZoneOwnedLimit(t *testing.T) {
+	h := newZoneHarnessLimited(t, 0, 2)
+	aliceID, tok := h.user("alice")
+	const pw = "zone-strong-pw"
+
+	for i := range 2 {
+		if r := h.req(http.MethodPost, "/api/v1/zones", tok, protocol.CreateZoneRequest{Name: fmt.Sprintf("z%d", i), Password: pw}); r.Code != http.StatusCreated {
+			t.Fatalf("create %d (under cap): status %d %s", i, r.Code, r.Body.String())
+		}
+	}
+	// At the cap → 409 zone_limit_reached, nothing created.
+	rec := h.req(http.MethodPost, "/api/v1/zones", tok, protocol.CreateZoneRequest{Name: "over", Password: pw})
+	if rec.Code != http.StatusConflict || decodeError(t, rec).Error != "zone_limit_reached" {
+		t.Fatalf("at cap: status %d body %s", rec.Code, rec.Body.String())
+	}
+	var list protocol.ZoneListResponse
+	decodeJSONBody(t, h.req(http.MethodGet, "/api/v1/zones", tok, nil).Body.Bytes(), &list)
+	if len(list.Zones) != 2 {
+		t.Fatalf("after refusal: %d zones, want 2 (nothing created)", len(list.Zones))
+	}
+
+	// Delete an owned zone → a slot frees; the next create succeeds again.
+	if r := h.req(http.MethodDelete, "/api/v1/zones/z0", tok, nil); r.Code != http.StatusNoContent {
+		t.Fatalf("delete owned zone: status %d", r.Code)
+	}
+	if r := h.req(http.MethodPost, "/api/v1/zones", tok, protocol.CreateZoneRequest{Name: "fresh", Password: pw}); r.Code != http.StatusCreated {
+		t.Fatalf("create after delete: status %d %s", r.Code, r.Body.String())
+	}
+
+	// Join is uncapped: while at her owned-zone cap, alice joins a zone bob owns.
+	_, bobTok := h.user("bob")
+	if r := h.req(http.MethodPost, "/api/v1/zones", bobTok, protocol.CreateZoneRequest{Name: "bobzone", Password: pw}); r.Code != http.StatusCreated {
+		t.Fatalf("bob create: status %d %s", r.Code, r.Body.String())
+	}
+	an := h.seedNode(aliceID, "alice-laptop")
+	if r := h.req(http.MethodPost, "/api/v1/zones/bobzone/join", tok, protocol.JoinZoneRequest{NodeID: an.ID, Password: pw}); r.Code != http.StatusOK {
+		t.Fatalf("join while at owned cap should succeed: status %d %s", r.Code, r.Body.String())
+	}
+}
+
+// US3 (023) — the admin account is exempt from the owned-zone cap (SC-008).
+func TestCreateZoneAdminExempt(t *testing.T) {
+	h := newZoneHarnessLimited(t, 0, 1) // a tiny positive cap
+	_, adminTok := h.adminUser("admin")
+	for i := range 3 { // well past the cap of 1
+		if r := h.req(http.MethodPost, "/api/v1/zones", adminTok, protocol.CreateZoneRequest{Name: fmt.Sprintf("z%d", i), Password: "zone-strong-pw"}); r.Code != http.StatusCreated {
+			t.Fatalf("admin create %d should bypass the cap: status %d %s", i, r.Code, r.Body.String())
+		}
+	}
 }
 
 func TestCreateZone(t *testing.T) {

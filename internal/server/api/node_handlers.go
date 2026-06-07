@@ -50,13 +50,21 @@ func (h *handlers) registerNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	node, err := h.store.Nodes().Create(r.Context(), id.UserID, name, req.WGPubKey, first, last)
+	// Admin is exempt from the cap; passing 0 reuses the store's unlimited path so no
+	// separate role check leaks into persistence (research.md Decision 2).
+	maxDevices := h.maxDevicesPerUser
+	if id.IsAdmin {
+		maxDevices = 0
+	}
+	node, err := h.store.Nodes().Create(r.Context(), id.UserID, name, req.WGPubKey, first, last, maxDevices)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrNodeNameTaken):
 			protocol.WriteJSONError(w, http.StatusConflict, "node_name_taken", "You already have a node with that name.")
 		case errors.Is(err, store.ErrPubKeyTaken):
 			protocol.WriteJSONError(w, http.StatusConflict, "pubkey_taken", "That public key is already registered.")
+		case errors.Is(err, store.ErrDeviceLimitReached):
+			protocol.WriteJSONError(w, http.StatusConflict, "device_limit_reached", "You have reached your device limit.")
 		case errors.Is(err, store.ErrPoolExhausted):
 			protocol.WriteJSONError(w, http.StatusServiceUnavailable, "pool_exhausted", "No addresses are available in the pool.")
 		default:

@@ -56,6 +56,8 @@ func testMux() *http.ServeMux {
 			protocol.WriteJSONError(w, http.StatusConflict, "pubkey_taken", "key taken")
 		case "full":
 			protocol.WriteJSONError(w, http.StatusServiceUnavailable, "pool_exhausted", "no addresses")
+		case "atlimit":
+			protocol.WriteJSONError(w, http.StatusConflict, "device_limit_reached", "device limit")
 		default:
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(protocol.NodeResponse{ID: 1, Name: req.Name, IP: "100.127.0.2"})
@@ -103,6 +105,9 @@ func TestClientHappyAndErrorMapping(t *testing.T) {
 	}
 	if _, err := c.RegisterNode("full", "pk"); !errors.Is(err, apiclient.ErrPoolExhausted) {
 		t.Errorf("pool: got %v, want ErrPoolExhausted", err)
+	}
+	if _, err := c.RegisterNode("atlimit", "pk"); !errors.Is(err, apiclient.ErrDeviceLimitReached) {
+		t.Errorf("device limit: got %v, want ErrDeviceLimitReached", err)
 	}
 	node, err := c.RegisterNode("laptop", "pk")
 	if err != nil || node.IP != "100.127.0.2" {
@@ -154,6 +159,19 @@ func TestZoneErrorMapping(t *testing.T) {
 	}
 	if err := c.LeaveZone("z", 1); !errors.Is(err, apiclient.ErrNotMember) {
 		t.Errorf("leave not-member: got %v, want ErrNotMember", err)
+	}
+}
+
+// TestZoneLimitMapping covers the 023 owned-zone-cap refusal mapping.
+func TestZoneLimitMapping(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/zones", func(w http.ResponseWriter, _ *http.Request) {
+		protocol.WriteJSONError(w, http.StatusConflict, "zone_limit_reached", "zone limit")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	if _, err := apiclient.New(srv.URL).CreateZone("z", 0, "zone-strong-pw"); !errors.Is(err, apiclient.ErrOwnedZoneLimitReached) {
+		t.Errorf("zone limit: got %v, want ErrOwnedZoneLimitReached", err)
 	}
 }
 

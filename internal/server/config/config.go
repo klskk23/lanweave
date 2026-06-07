@@ -41,6 +41,20 @@ type Config struct {
 	NFTables  NFTablesConfig  `toml:"nftables"`
 	Auth      AuthConfig      `toml:"auth"`
 	Admin     AdminConfig     `toml:"admin"`
+	Limits    LimitsConfig    `toml:"limits"`
+}
+
+// defaultPerUserLimit is the cap applied to a per-user limit whose key is absent
+// from the config (unset → 10). An explicit 0 means unlimited and is preserved.
+const defaultPerUserLimit = 10
+
+// LimitsConfig holds the two server-wide per-user caps. Each field is a three-state
+// pointer mirroring ServerConfig.TLS: nil (key absent) → default 10; an explicit 0 →
+// unlimited; a negative value is rejected by Validate. The pointer keeps "unset"
+// distinct from "explicit 0" so 0 can carry the "unlimited" meaning.
+type LimitsConfig struct {
+	MaxDevicesPerUser    *int `toml:"max_devices_per_user"`
+	MaxOwnedZonesPerUser *int `toml:"max_owned_zones_per_user"`
 }
 
 type ServerConfig struct {
@@ -172,6 +186,14 @@ func (c *Config) applyDefaults() {
 	if c.NFTables.Table == "" {
 		c.NFTables.Table = "lanweave"
 	}
+	if c.Limits.MaxDevicesPerUser == nil {
+		v := defaultPerUserLimit
+		c.Limits.MaxDevicesPerUser = &v
+	}
+	if c.Limits.MaxOwnedZonesPerUser == nil {
+		v := defaultPerUserLimit
+		c.Limits.MaxOwnedZonesPerUser = &v
+	}
 }
 
 // Validate collects every configuration problem and returns them joined, so the
@@ -252,6 +274,16 @@ func (c *Config) Validate() error {
 	}
 	if c.Admin.Password.Reveal() == "" {
 		errs = append(errs, errors.New("admin.password is required"))
+	}
+
+	// Per-user caps: a set value must be >= 0 (0 = unlimited). nil means "unset" and
+	// is valid — applyDefaults resolves it to 10 — so the check is nil-safe, mirroring
+	// the TLS three-state pointer.
+	if v := c.Limits.MaxDevicesPerUser; v != nil && *v < 0 {
+		errs = append(errs, errors.New("limits.max_devices_per_user must be >= 0 (0 = unlimited)"))
+	}
+	if v := c.Limits.MaxOwnedZonesPerUser; v != nil && *v < 0 {
+		errs = append(errs, errors.New("limits.max_owned_zones_per_user must be >= 0 (0 = unlimited)"))
 	}
 
 	return errors.Join(errs...)

@@ -61,13 +61,22 @@ func (h *handlers) createZone(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, err)
 		return
 	}
-	zone, err := h.store.Zones().Create(r.Context(), id.UserID, name, hash)
+	// Admin is exempt from the cap; passing 0 reuses the store's unlimited path so no
+	// separate role check leaks into persistence (research.md Decision 2).
+	maxOwnedZones := h.maxOwnedZonesPerUser
+	if id.IsAdmin {
+		maxOwnedZones = 0
+	}
+	zone, err := h.store.Zones().Create(r.Context(), id.UserID, name, hash, maxOwnedZones)
 	if err != nil {
-		if errors.Is(err, store.ErrZoneNameTaken) {
+		switch {
+		case errors.Is(err, store.ErrZoneNameTaken):
 			protocol.WriteJSONError(w, http.StatusConflict, "zone_name_taken", "That zone name is already taken.")
-			return
+		case errors.Is(err, store.ErrOwnedZoneLimitReached):
+			protocol.WriteJSONError(w, http.StatusConflict, "zone_limit_reached", "You have reached your zone limit.")
+		default:
+			h.serverError(w, err)
 		}
-		h.serverError(w, err)
 		return
 	}
 	if err := h.netfw.AddZone(zone.ID); err != nil {
