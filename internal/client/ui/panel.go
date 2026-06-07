@@ -502,30 +502,85 @@ func (p *Panel) offerTrust(ce *apiclient.CertError, onAccept func()) {
 		i18n.T("trust.firstBody", p.rec.ServerURL, fp), accept, p.win)
 }
 
-// confirmLogout names this device + server and the consequences, then on confirmation tears down
-// the tunnel, runs the logout, warns if the remote node may linger, and returns to the wizard.
+// confirmLogout names this device + server and the consequences, then on confirmation runs the
+// remote-first hardened logout (slice 025).
 func (p *Panel) confirmLogout() {
 	msg := i18n.T("panel.logoutConfirm", p.rec.NodeName, p.rec.ServerURL)
 	dialog.ShowConfirm(i18n.T("panel.logout"), msg, func(ok bool) {
-		if !ok {
-			return
+		if ok {
+			p.runLogout()
 		}
-		prog := dialog.NewCustomWithoutButtons(i18n.T("panel.loggingOut"), widget.NewProgressBarInfinite(), p.win)
-		prog.Show()
-		go func() {
-			_ = p.tn.Disconnect()
-			remoteRemoved, lerr := p.ctrl.Logout()
-			fyne.Do(func() {
-				prog.Hide()
-				if lerr != nil {
-					dialog.ShowInformation(i18n.T("panel.loggedOutTitle"), i18n.T("panel.logoutPartialFail"), p.win)
-				} else if !remoteRemoved {
+	}, p.win)
+}
+
+// runLogout removes the remote node FIRST (the tunnel stays up — the control API is public HTTPS,
+// independent of the tunnel), then branches on the outcome: LogoutBlocked shows the two-button
+// blocked prompt with NO local change; LogoutNeedSignIn prompts a fresh sign-in then retries;
+// LogoutDone disconnects the tunnel and returns to the wizard (warning if the node may linger).
+func (p *Panel) runLogout() {
+	prog := dialog.NewCustomWithoutButtons(i18n.T("panel.loggingOut"), widget.NewProgressBarInfinite(), p.win)
+	prog.Show()
+	go func() {
+		outcome, lerr := p.ctrl.Logout()
+		if outcome == panel.LogoutDone {
+			_ = p.tn.Disconnect() // only tear the tunnel down once removal is safely done
+		}
+		fyne.Do(func() {
+			prog.Hide()
+			switch outcome {
+			case panel.LogoutBlocked:
+				p.showLogoutBlocked()
+			case panel.LogoutNeedSignIn:
+				info := dialog.NewInformation(i18n.T("panel.logout"), i18n.T("panel.logoutNeedSignIn"), p.win)
+				info.SetOnClosed(func() { p.promptSignInThen(p.runLogout) })
+				info.Show()
+			default: // LogoutDone
+				if errors.Is(lerr, panel.ErrRemoteMayLinger) {
 					dialog.ShowInformation(i18n.T("panel.loggedOutTitle"), i18n.T("panel.logoutRemoteLinger"), p.win)
+				} else if lerr != nil {
+					dialog.ShowInformation(i18n.T("panel.loggedOutTitle"), i18n.T("panel.logoutPartialFail"), p.win)
 				}
 				p.restart()
-			})
-		}()
-	}, p.win)
+			}
+		})
+	}()
+}
+
+// showLogoutBlocked presents the two-button blocked prompt: Cancel (default — stay signed in, no
+// local change) and "Force log out anyway" (the escape hatch, accepting a server-side orphan).
+func (p *Panel) showLogoutBlocked() {
+	body := widget.NewLabel(i18n.T("panel.logoutBlockedBody"))
+	body.Wrapping = fyne.TextWrapWord
+	dialog.NewCustomConfirm(
+		i18n.T("panel.logoutBlockedTitle"),
+		i18n.T("panel.logoutForce"),  // confirm button
+		i18n.T("panel.logoutCancel"), // dismiss button (default)
+		body,
+		func(force bool) {
+			if force {
+				p.runForceLogout()
+			}
+		},
+		p.win,
+	).Show()
+}
+
+// runForceLogout tears down the tunnel and does the unconditional full local teardown, returning
+// to the wizard and accepting a server-side orphaned node.
+func (p *Panel) runForceLogout() {
+	prog := dialog.NewCustomWithoutButtons(i18n.T("panel.loggingOut"), widget.NewProgressBarInfinite(), p.win)
+	prog.Show()
+	go func() {
+		_ = p.tn.Disconnect()
+		lerr := p.ctrl.ForceLogout()
+		fyne.Do(func() {
+			prog.Hide()
+			if lerr != nil {
+				dialog.ShowInformation(i18n.T("panel.loggedOutTitle"), i18n.T("panel.logoutPartialFail"), p.win)
+			}
+			p.restart()
+		})
+	}()
 }
 
 // start validates the session (prompting sign-in if needed), then refreshes and polls.
@@ -553,7 +608,19 @@ func (p *Panel) pollLoop() {
 	}
 }
 
+// promptSignIn is the session-start re-auth: on success it refreshes the view and starts polling.
 func (p *Panel) promptSignIn() {
+	p.promptSignInThen(func() {
+		p.refresh()
+		go p.pollLoop()
+	})
+}
+
+// promptSignInThen shows the username/password form and runs onSuccess after a successful sign-in,
+// re-prompting on a bad credential and aborting (no-op) on cancel. The continuation is
+// parameterized so the same dialog serves both session-start (refresh + poll) and the logout
+// retry (re-invoke runLogout) paths (slice 025 T018).
+func (p *Panel) promptSignInThen(onSuccess func()) {
 	user := widget.NewEntry()
 	pass := widget.NewPasswordEntry()
 	form := dialog.NewForm(i18n.T("panel.signIn"), i18n.T("panel.signIn"), i18n.T("btn.cancel"),
@@ -567,11 +634,10 @@ func (p *Panel) promptSignIn() {
 				fyne.Do(func() {
 					if err != nil {
 						dialog.ShowError(errors.New(panelMessage(err)), p.win)
-						p.promptSignIn()
+						p.promptSignInThen(onSuccess)
 						return
 					}
-					p.refresh()
-					go p.pollLoop()
+					onSuccess()
 				})
 			}()
 		}, p.win)

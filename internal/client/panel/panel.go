@@ -6,6 +6,7 @@ package panel
 
 import (
 	"errors"
+	"time"
 
 	"lanweave/internal/client/apiclient"
 	"lanweave/internal/client/firewall"
@@ -42,6 +43,38 @@ var _ api = (*apiclient.Client)(nil)
 // can distinguish "already gone" from a list/network failure).
 var errNotRegistered = errors.New("this device is not registered with the server")
 
+// ErrRemoteMayLinger accompanies a LogoutDone when the remote node removal hit a *reachable*
+// non-network, non-auth failure (e.g. a 5xx or a changed certificate). Local teardown still
+// completes (the user is signed out locally), but the server-side node may still be registered,
+// so the GUI surfaces the "remote may still be registered" advisory. It is NOT a local error.
+var ErrRemoteMayLinger = errors.New("remote node may still be registered")
+
+// LogoutOutcome classifies an attempted logout (data-model.md outcome table).
+type LogoutOutcome int
+
+const (
+	// LogoutDone: the remote node was confirmed removed (or already absent); the refresh token
+	// was revoked best-effort and all local material (keyring + state) was cleared.
+	LogoutDone LogoutOutcome = iota
+	// LogoutBlocked: every remote-removal attempt failed with network-unreachability. NOTHING
+	// changed — tunnel, firewall, keyring, and state are all intact; the GUI shows the two-button
+	// blocked prompt (Cancel / Force).
+	LogoutBlocked
+	// LogoutNeedSignIn: the session expired and the lazy refresh also failed. Nothing changed; the
+	// GUI prompts a fresh sign-in and, on success, retries Logout().
+	LogoutNeedSignIn
+)
+
+// removeResult is the internal classification of a remote-node removal attempt.
+type removeResult int
+
+const (
+	removeDone       removeResult = iota // removed, or already absent (404 / not in list)
+	removeBlocked                        // network-unreachable (retryable / blocking)
+	removeNeedSignIn                     // session expired and refresh failed
+	removeWarn                           // reachable but failed (5xx / cert) — proceed, warn linger
+)
+
 // View models rendered by the Fyne panel.
 type (
 	DeviceView struct {
@@ -71,6 +104,10 @@ type Controller struct {
 	statePath string
 	insecure  bool
 	fw        firewall.Control
+	// sleep is the delay between bounded remote-removal retries (research D3). Defaults to
+	// time.Sleep; tests replace it (via export_test.go) with a no-op/recorder so the suite is
+	// instant and deterministic (Constitution II — no wall-clock sleeps in tests).
+	sleep func(time.Duration)
 }
 
 // New builds a controller bound to an API client, the setup record (to identify this
@@ -78,7 +115,7 @@ type Controller struct {
 // clear the local state file; insecure seeds the "certificate not verified" indicator for
 // the --insecure CLI-flag case; fw installs/removes the optional host inbound-allow rule.
 func New(a api, record state.Record, keys keyring.Store, statePath string, insecure bool, fw firewall.Control) *Controller {
-	return &Controller{api: a, record: record, keys: keys, statePath: statePath, insecure: insecure, fw: fw}
+	return &Controller{api: a, record: record, keys: keys, statePath: statePath, insecure: insecure, fw: fw, sleep: time.Sleep}
 }
 
 // Insecure reports whether this session is bypassing TLS certificate verification (set from
@@ -208,40 +245,106 @@ func (c *Controller) DeleteZone(name string) error {
 	return c.api.DeleteZone(name)
 }
 
-// Logout deregisters this device on the server (best-effort) and ALWAYS clears the local
-// session token, device private key, and state record — so an offline user can still leave.
-// remoteRemoved reports whether the server-side node is gone (confirmed removed or already
-// absent); err is non-nil only when a local clear failed.
-func (c *Controller) Logout() (remoteRemoved bool, err error) {
-	remoteRemoved = c.removeRemoteNode()
-	// Revoke the refresh token server-side so a cached RT can never silently renew after
-	// logout. Best-effort: a network failure must not block the local sign-out below.
+// Logout runs the remote-first hardened sign-out (slice 025). It removes this device's own
+// node FIRST (the control API is public HTTPS, independent of the tunnel), retrying ONLY on
+// network-unreachability up to 3 times at 1 s. The outcome drives the GUI:
+//
+//   - LogoutBlocked: every attempt hit network-unreachability → NOTHING is touched (no firewall
+//     clear, no keyring/state delete) so the user can retry or force; err is nil.
+//   - LogoutNeedSignIn: the session expired and the lazy refresh also failed → nothing touched.
+//   - LogoutDone: the node is gone (or already absent), OR a reachable non-network failure
+//     occurred (in which case err is ErrRemoteMayLinger). Either way the refresh token is revoked
+//     best-effort, the host firewall rule is cleared, and the keyring + state are cleared. A
+//     non-nil err is ErrRemoteMayLinger (benign linger advisory) and/or a local-teardown failure.
+func (c *Controller) Logout() (LogoutOutcome, error) {
+	switch c.removeRemoteNode() {
+	case removeBlocked:
+		// Nothing changed: the node is the orphan-causing residue and it is still there.
+		return LogoutBlocked, nil
+	case removeNeedSignIn:
+		return LogoutNeedSignIn, nil
+	case removeWarn:
+		return LogoutDone, errors.Join(ErrRemoteMayLinger, c.tearDownLocal())
+	default: // removeDone
+		return LogoutDone, c.tearDownLocal()
+	}
+}
+
+// ForceLogout is the escape hatch from the blocked prompt: an unconditional full local teardown
+// that accepts a server-side orphaned node. It best-effort revokes the refresh token, clears the
+// host firewall rule, and deletes the keyring + state — the old always-clear behavior, now
+// reachable only via the force button (research D5, INV-5).
+func (c *Controller) ForceLogout() error {
+	return c.tearDownLocal()
+}
+
+// tearDownLocal revokes this device's refresh token (best-effort) then clears all local material:
+// the host firewall rule, the three keyring entries, and the state file. The returned error is
+// non-nil only when a local delete failed (the RT revoke is best-effort and never re-blocks).
+func (c *Controller) tearDownLocal() error {
+	// Revoke the refresh token server-side so a cached RT can never silently renew after logout.
+	// Best-effort (research D6): the orphan-causing residue, the node, is already gone.
 	_ = c.api.Logout()
 	// Close the host rule before clearing state so logout never strands an open firewall.
 	_ = c.fw.Clear()
-	localErr := errors.Join(
+	return errors.Join(
 		c.keys.Delete(keyring.SessionTokenName),
 		c.keys.Delete(keyring.RefreshTokenName),
 		c.keys.Delete(keyring.DeviceKeyName),
 		state.Clear(c.statePath),
 	)
-	return remoteRemoved, localErr
 }
 
-// removeRemoteNode best-effort deletes this device's own node. It returns true when the
-// server confirmed removal or the node was already absent, and false when the server was
-// unreachable or the delete failed (so the UI can warn the node may still be registered).
-func (c *Controller) removeRemoteNode() bool {
+// removeRemoteNode deletes this device's own node with a bounded retry: at most 3 attempts, a
+// c.sleep(1s) between attempts, retrying ONLY on network-unreachability. It classifies the
+// terminal result into removeDone (removed / already absent), removeBlocked (unreachable after
+// all attempts), removeNeedSignIn (session expired + refresh failed), or removeWarn (reachable
+// but failed — 5xx / cert change).
+func (c *Controller) removeRemoteNode() removeResult {
+	const maxAttempts = 3
+	res := removeBlocked
+	for attempt := range maxAttempts {
+		if attempt > 0 {
+			c.sleep(1 * time.Second)
+		}
+		if res = c.tryRemoveRemoteNode(); res != removeBlocked {
+			return res
+		}
+	}
+	return res // removeBlocked after maxAttempts
+}
+
+// tryRemoveRemoteNode is a single removal attempt: resolve this machine's node id then delete it.
+// A 404 (ErrZoneNotFound) or a not-in-list (errNotRegistered) is removeDone (already absent).
+func (c *Controller) tryRemoveRemoteNode() removeResult {
 	id, err := c.thisMachineNodeID()
 	if err != nil {
-		// Not in the list → already gone (removed); a list (network) failure → not removed.
-		return errors.Is(err, errNotRegistered)
+		if errors.Is(err, errNotRegistered) {
+			return removeDone // already absent
+		}
+		return classifyRemoveErr(err)
 	}
 	if derr := c.api.DeleteNode(id); derr != nil {
-		// A 404 (raced, already gone) counts as removed; network/5xx does not.
-		return errors.Is(derr, apiclient.ErrZoneNotFound)
+		if errors.Is(derr, apiclient.ErrZoneNotFound) {
+			return removeDone // raced, already gone
+		}
+		return classifyRemoveErr(derr)
 	}
-	return true
+	return removeDone
+}
+
+// classifyRemoveErr maps a removal error to a removeResult. Only ErrUnreachable blocks (research
+// D1); ErrSessionExpired/ErrRefreshFailed need a fresh sign-in; everything else (5xx, cert) is a
+// reachable failure that proceeds with a linger warning.
+func classifyRemoveErr(err error) removeResult {
+	switch {
+	case errors.Is(err, apiclient.ErrUnreachable):
+		return removeBlocked
+	case errors.Is(err, apiclient.ErrSessionExpired), errors.Is(err, apiclient.ErrRefreshFailed):
+		return removeNeedSignIn
+	default:
+		return removeWarn
+	}
 }
 
 // UseClient swaps in a freshly built API client (e.g. rebuilt with apiclient.WithPinnedCert
