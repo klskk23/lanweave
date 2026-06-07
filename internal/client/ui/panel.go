@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -44,6 +45,10 @@ type Panel struct {
 
 	connFailed  bool          // last Connect attempt failed → red "connection failed"
 	trafficQuit chan struct{} // stops the 2s traffic poller; nil when not polling
+
+	healthMu    sync.Mutex    // guards healthQuit (start/stop of the health loop)
+	healthQuit  chan struct{} // stops the 15s health/auto-reconnect loop; nil when not running
+	reconnectMu sync.Mutex    // single-flights healthTick so overlapping ticks never stack
 
 	menuBtn  *widget.Button
 	nodesBox *fyne.Container
@@ -165,6 +170,7 @@ func overflowContent(insecure bool, pinned string, win fyne.Window, onLogout fun
 // heroData is the immutable input to heroCard; the Panel fills it from the tunnel/controller.
 type heroData struct {
 	state       tunnel.State
+	desired     bool
 	failed      bool
 	deviceName  string
 	ip          string
@@ -184,27 +190,34 @@ type heroRefs struct {
 	traffic    *canvas.Text
 }
 
-// primaryActionLabel is the single Hero button's label for a tunnel state: Disconnect when
-// connected, otherwise Connect (FR-006). Pure function for unit testing.
-func primaryActionLabel(st tunnel.State) string {
-	if st == tunnel.Connected {
+// primaryActionLabel is the single Hero button's label: Disconnect whenever the user wants the
+// link up — connected, or desired during the auto-reconnect retry window — otherwise Connect, so
+// the same button always aborts an in-progress self-heal (FR-006/FR-014). Pure for unit testing.
+func primaryActionLabel(st tunnel.State, desired bool) string {
+	if st == tunnel.Connected || desired {
 		return i18n.T("panel.disconnect")
 	}
 	return i18n.T("panel.connect")
 }
 
-// statusView maps a tunnel state (plus a transient failed flag) to the status dot/text color
-// and label (FR-005). Pure function for unit testing.
-func statusView(st tunnel.State, failed bool) (color.Color, string) {
-	if failed && st == tunnel.Disconnected {
-		return dangerColor, i18n.T("status.failed")
-	}
+// statusView derives the status dot/text color and label from three inputs (state, desired,
+// failed). Precedence (data-model "优先级"): a live link is green; a connecting link is yellow;
+// while disconnected, desired (the auto-reconnect retry window) shows yellow "connecting" and
+// wins over failed — red "failed" appears only when the user is NOT trying to connect and the
+// last manual attempt failed; otherwise grey "disconnected" (FR-005/FR-009/FR-013/FR-014). Pure.
+func statusView(st tunnel.State, desired, failed bool) (color.Color, string) {
 	switch st {
 	case tunnel.Connected:
 		return successColor, i18n.T("status.connected")
 	case tunnel.Connecting:
 		return warningColor, i18n.T("status.connecting")
-	default:
+	default: // Disconnected
+		if desired {
+			return warningColor, i18n.T("status.connecting") // retry window — not "failed"
+		}
+		if failed {
+			return dangerColor, i18n.T("status.failed")
+		}
 		return textTertiary, i18n.T("status.disconnected")
 	}
 }
@@ -217,7 +230,7 @@ func trafficString(up, down int64) string {
 // heroCard builds the Hero card from heroData, wiring the single primary button to onPrimary
 // and the inbound Switch to onToggle. Returns the widgets the Panel updates live.
 func heroCard(d heroData, onPrimary func(), onToggle func(bool)) heroRefs {
-	dotColor, statusStr := statusView(d.state, d.failed)
+	dotColor, statusStr := statusView(d.state, d.desired, d.failed)
 	dot := canvas.NewCircle(dotColor)
 	statusText := coloredText(statusStr, dotColor)
 
@@ -240,7 +253,7 @@ func heroCard(d heroData, onPrimary func(), onToggle func(bool)) heroRefs {
 	ip.TextSize = 13
 	ip.TextStyle = fyne.TextStyle{Monospace: true}
 
-	btn := widget.NewButton(primaryActionLabel(d.state), onPrimary)
+	btn := widget.NewButton(primaryActionLabel(d.state, d.desired), onPrimary)
 	btn.Importance = widget.HighImportance
 	if d.state == tunnel.Connecting {
 		btn.Disable()
@@ -273,6 +286,7 @@ func (p *Panel) buildHero() fyne.CanvasObject {
 	st := p.tn.State()
 	d := heroData{
 		state:       st,
+		desired:     p.tn.Desired(),
 		failed:      p.connFailed,
 		deviceName:  p.rec.NodeName,
 		ip:          p.rec.IP,
@@ -293,9 +307,11 @@ func (p *Panel) buildHero() fyne.CanvasObject {
 	return refs.object
 }
 
-// onPrimary is the single Hero button: disconnect when connected, otherwise connect (FR-006).
+// onPrimary is the single Hero button: disconnect when connected OR while the user wants the link
+// up (the auto-reconnect retry window), otherwise connect — so the button also aborts a running
+// self-heal (FR-006/FR-014).
 func (p *Panel) onPrimary() {
-	if p.tn.State() == tunnel.Connected {
+	if p.tn.State() == tunnel.Connected || p.tn.Desired() {
 		p.onDisconnect()
 		return
 	}
@@ -305,15 +321,16 @@ func (p *Panel) onPrimary() {
 func (p *Panel) onConnect() {
 	p.connFailed = false
 	p.heroBtn.Disable()
-	p.applyStatus(tunnel.Connecting, false)
+	p.applyStatus(tunnel.Connecting, false, false)
 	go func() {
 		err := p.tn.Connect()
 		if err == nil {
+			p.tn.SetDesired(true)              // record intent ONLY on success → enables self-heal (FR-006)
 			_ = p.ctrl.ReconcileFirewall(true) // install the host rule iff opted in
 		}
 		fyne.Do(func() {
 			if err != nil {
-				p.connFailed = true
+				p.connFailed = true // a failed manual connect leaves Desired()==false → no retry (FR-009)
 				dialog.ShowError(errors.New(tunnelMessage(err)), p.win)
 			}
 			p.refreshConnection()
@@ -322,6 +339,7 @@ func (p *Panel) onConnect() {
 }
 
 func (p *Panel) onDisconnect() {
+	p.tn.SetDesired(false) // user intent wins; stops any background auto-reconnect (FR-011)
 	_ = p.tn.Disconnect()
 	_ = p.ctrl.ReconcileFirewall(false) // no tunnel → never leave the host rule open
 	p.connFailed = false
@@ -341,8 +359,9 @@ func (p *Panel) onFirewallToggle(on bool) {
 // and starts/stops the traffic poller.
 func (p *Panel) refreshConnection() {
 	st := p.tn.State()
-	p.applyStatus(st, p.connFailed)
-	p.heroBtn.SetText(primaryActionLabel(st))
+	desired := p.tn.Desired()
+	p.applyStatus(st, desired, p.connFailed)
+	p.heroBtn.SetText(primaryActionLabel(st, desired))
 	switch st {
 	case tunnel.Connected:
 		p.heroBtn.Enable()
@@ -350,13 +369,13 @@ func (p *Panel) refreshConnection() {
 	case tunnel.Connecting:
 		p.heroBtn.Disable()
 	default:
-		p.heroBtn.Enable()
+		p.heroBtn.Enable() // retry window stays tappable so the user can abort the self-heal
 		p.stopTraffic()
 	}
 }
 
-func (p *Panel) applyStatus(st tunnel.State, failed bool) {
-	c, s := statusView(st, failed)
+func (p *Panel) applyStatus(st tunnel.State, desired, failed bool) {
+	c, s := statusView(st, desired, failed)
 	p.statusDot.FillColor = c
 	p.statusDot.Refresh()
 	p.statusText.Color = c
@@ -523,7 +542,9 @@ func (p *Panel) runLogout() {
 	go func() {
 		outcome, lerr := p.ctrl.Logout()
 		if outcome == panel.LogoutDone {
-			_ = p.tn.Disconnect() // only tear the tunnel down once removal is safely done
+			p.stopHealth()
+			p.tn.SetDesired(false) // logged out → no self-heal of a torn-down tunnel
+			_ = p.tn.Disconnect()  // only tear the tunnel down once removal is safely done
 		}
 		fyne.Do(func() {
 			prog.Hide()
@@ -571,6 +592,8 @@ func (p *Panel) runForceLogout() {
 	prog := dialog.NewCustomWithoutButtons(i18n.T("panel.loggingOut"), widget.NewProgressBarInfinite(), p.win)
 	prog.Show()
 	go func() {
+		p.stopHealth()
+		p.tn.SetDesired(false)
 		_ = p.tn.Disconnect()
 		lerr := p.ctrl.ForceLogout()
 		fyne.Do(func() {
@@ -600,6 +623,7 @@ func (p *Panel) start() {
 	}
 	p.refresh()
 	go p.pollLoop()
+	p.startHealth()
 }
 
 func (p *Panel) pollLoop() {
@@ -608,11 +632,87 @@ func (p *Panel) pollLoop() {
 	}
 }
 
+// startHealth launches the auto-reconnect health loop if it is not already running. Idempotent
+// (start() may run several times — e.g. a TOFU retry), so the guard keeps it a single goroutine.
+func (p *Panel) startHealth() {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	if p.healthQuit != nil {
+		return
+	}
+	q := make(chan struct{})
+	p.healthQuit = q
+	go p.healthLoop(q)
+}
+
+// stopHealth tears the health loop down (logout paths), so a logged-out session never tries to
+// auto-reconnect a torn-down tunnel.
+func (p *Panel) stopHealth() {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	if p.healthQuit != nil {
+		close(p.healthQuit)
+		p.healthQuit = nil
+	}
+}
+
+// healthLoop is the auto-reconnect heartbeat: a dedicated 15s ticker, decoupled from pollLoop so
+// self-heal never blocks the node-list refresh (FR-004/FR-005). It exits when quit is closed.
+func (p *Panel) healthLoop(quit chan struct{}) {
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-quit:
+			return
+		case <-t.C:
+			p.healthTick(time.Now())
+		}
+	}
+}
+
+// healthTick performs one self-heal pass. It acts only when the user wants the link up
+// (Desired) and the tunnel is either silently dead (Stale) or already down — i.e. inside the
+// retry window. It re-runs the same connect+firewall path as a manual connect but FULLY SILENT
+// (no dialogs, FR-015), mirroring the firewall to the live state (closed during the retry window,
+// FR-016). A fixed 15s cadence with no backoff (FR-010); overlapping ticks are single-flighted so
+// a slow attempt never stacks. A manual Disconnect (Desired→false + teardown) makes the in-flight
+// Connect abandon via its engine-identity guard, so the user always wins (FR-011/FR-012).
+func (p *Panel) healthTick(now time.Time) {
+	if !p.tn.Desired() {
+		return
+	}
+	if p.tn.State() == tunnel.Connected && !p.tn.Stale(now) {
+		return // healthy link — nothing to do (and no false reconnect, SC-002)
+	}
+	if !p.reconnectMu.TryLock() {
+		return // a reconnect is already in flight
+	}
+	defer p.reconnectMu.Unlock()
+
+	// A stale-but-"Connected" tunnel must be torn down first, else Connect() is a no-op ("one
+	// tunnel only"). Closing it also drops the firewall for the retry window (FR-016).
+	if p.tn.State() != tunnel.Disconnected {
+		_ = p.tn.Disconnect()
+		_ = p.ctrl.ReconcileFirewall(false)
+	}
+	fyne.Do(p.refreshConnection) // show yellow "connecting" promptly (FR-013), silently
+
+	err := p.tn.Connect()
+	if err == nil && p.tn.Desired() {
+		_ = p.ctrl.ReconcileFirewall(true)
+	} else {
+		_ = p.ctrl.ReconcileFirewall(false) // failed, or the user disconnected mid-attempt
+	}
+	fyne.Do(p.refreshConnection)
+}
+
 // promptSignIn is the session-start re-auth: on success it refreshes the view and starts polling.
 func (p *Panel) promptSignIn() {
 	p.promptSignInThen(func() {
 		p.refresh()
 		go p.pollLoop()
+		p.startHealth()
 	})
 }
 
