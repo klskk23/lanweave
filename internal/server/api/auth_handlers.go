@@ -12,10 +12,24 @@ import (
 	"lanweave/internal/server/netfw"
 	"lanweave/internal/server/store"
 	"lanweave/internal/server/wg"
+	"lanweave/pkg/passwordpolicy"
 	"lanweave/pkg/protocol"
 )
 
-const minPasswordLen = 8
+// passwordPolicyMessage maps a passwordpolicy.Reason to the English, API-facing
+// rejection message. Related reasons are deliberately collapsed into a single
+// phrase here; precise per-rule guidance is the client's job (it renders the
+// typed reason via i18n). See specs/027-password-complexity/contracts/register.md.
+func passwordPolicyMessage(reason passwordpolicy.Reason) string {
+	switch reason {
+	case passwordpolicy.ReasonCharset:
+		return "Password may only contain ASCII letters, digits, and symbols (no spaces)."
+	case passwordpolicy.ReasonTooShort, passwordpolicy.ReasonTooLong:
+		return "Password must be 8-64 characters."
+	default: // ReasonNoUpper, ReasonNoLower, ReasonNoDigit
+		return "Password must include an uppercase letter, a lowercase letter, and a digit."
+	}
+}
 
 // handlers holds the dependencies shared by the control-plane endpoints.
 type handlers struct {
@@ -176,10 +190,12 @@ func (h *handlers) register(w http.ResponseWriter, r *http.Request) {
 	case username == "" || len(username) > 64:
 		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", "Username must be 1-64 characters.")
 		return
-	case len(req.Password) < minPasswordLen:
-		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", "Password must be at least 8 characters.")
+	}
+	if reason, ok := passwordpolicy.Validate(req.Password); !ok {
+		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", passwordPolicyMessage(reason))
 		return
-	case req.InviteCode == "":
+	}
+	if req.InviteCode == "" {
 		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", "An invite code is required.")
 		return
 	}

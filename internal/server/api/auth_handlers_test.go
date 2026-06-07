@@ -12,6 +12,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"lanweave/internal/server/auth"
 	"lanweave/pkg/protocol"
 )
 
@@ -149,7 +150,7 @@ func TestDeleteUserRevokesRefreshTokens(t *testing.T) {
 	h := newHarness(t)
 	adminToken := h.loginToken("admin", h.adminPW)
 	code := h.createInviteCode(adminToken)
-	const bobPw = "bobs-strong-pw"
+	const bobPw = "Bobpass123"
 	if rec := h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
 		InviteCode: code, Username: "bob", Password: bobPw,
 	}); rec.Code != http.StatusCreated {
@@ -227,7 +228,7 @@ func TestRegisterFlow(t *testing.T) {
 
 	// Register with the code.
 	rec := h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
-		InviteCode: code, Username: "bob", Password: "bobs-strong-pw",
+		InviteCode: code, Username: "bob", Password: "Bobpass123",
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("register status %d: %s", rec.Code, rec.Body.String())
@@ -239,7 +240,7 @@ func TestRegisterFlow(t *testing.T) {
 	}
 
 	// New user can log in and is not admin.
-	bobToken := h.loginToken("bob", "bobs-strong-pw")
+	bobToken := h.loginToken("bob", "Bobpass123")
 	meRec := h.do(http.MethodGet, "/api/v1/me", bobToken, nil)
 	var me protocol.MeResponse
 	_ = json.Unmarshal(meRec.Body.Bytes(), &me)
@@ -255,7 +256,7 @@ func TestRegisterRejections(t *testing.T) {
 
 	// Consume the code once.
 	if rec := h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
-		InviteCode: code, Username: "bob", Password: "bobs-strong-pw",
+		InviteCode: code, Username: "bob", Password: "Bobpass123",
 	}); rec.Code != http.StatusCreated {
 		t.Fatalf("setup register failed: %d", rec.Code)
 	}
@@ -266,9 +267,9 @@ func TestRegisterRejections(t *testing.T) {
 		wantCode int
 		wantErr  string
 	}{
-		{"reused code", protocol.RegisterRequest{InviteCode: code, Username: "carol", Password: "carols-strong-pw"}, http.StatusUnprocessableEntity, "invite_invalid"},
-		{"unknown code", protocol.RegisterRequest{InviteCode: "nope", Username: "dave", Password: "daves-strong-pw"}, http.StatusUnprocessableEntity, "invite_invalid"},
-		{"missing code", protocol.RegisterRequest{Username: "erin", Password: "erins-strong-pw"}, http.StatusBadRequest, "validation_error"},
+		{"reused code", protocol.RegisterRequest{InviteCode: code, Username: "carol", Password: "Carolpass123"}, http.StatusUnprocessableEntity, "invite_invalid"},
+		{"unknown code", protocol.RegisterRequest{InviteCode: "nope", Username: "dave", Password: "Davepass123"}, http.StatusUnprocessableEntity, "invite_invalid"},
+		{"missing code", protocol.RegisterRequest{Username: "erin", Password: "Erinpass123"}, http.StatusBadRequest, "validation_error"},
 		{"short password", protocol.RegisterRequest{InviteCode: code, Username: "frank", Password: "short"}, http.StatusBadRequest, "validation_error"},
 	}
 	for _, tc := range cases {
@@ -286,7 +287,7 @@ func TestRegisterRejections(t *testing.T) {
 	// Taken username with a FRESH code → 409, fresh code stays unused.
 	code2 := h.createInviteCode(adminToken)
 	rec := h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
-		InviteCode: code2, Username: "bob", Password: "another-strong-pw",
+		InviteCode: code2, Username: "bob", Password: "Anotherpass123",
 	})
 	if rec.Code != http.StatusConflict || decodeError(t, rec).Error != "username_taken" {
 		t.Fatalf("taken username: status %d body %s", rec.Code, rec.Body.String())
@@ -314,10 +315,10 @@ func TestRegisterExpiredCodeIndistinguishable(t *testing.T) {
 	}
 
 	expired := h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
-		InviteCode: "expired-code", Username: "bob", Password: "bobs-strong-pw",
+		InviteCode: "expired-code", Username: "bob", Password: "Bobpass123",
 	})
 	unknown := h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
-		InviteCode: "no-such-code", Username: "carol", Password: "carols-strong-pw",
+		InviteCode: "no-such-code", Username: "carol", Password: "Carolpass123",
 	})
 
 	if expired.Code != http.StatusUnprocessableEntity {
@@ -337,12 +338,97 @@ func TestRegisterExpiredCodeIndistinguishable(t *testing.T) {
 	}
 }
 
+// TestRegisterPasswordPolicy covers US1 / FR-005: every non-compliant password is
+// rejected at registration with a validation_error, no account is created, and the
+// invite is NOT consumed — while a compliant password through the same code succeeds.
+// It also asserts the password never reaches the server logs.
+func TestRegisterPasswordPolicy(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	adminToken := h.loginToken("admin", h.adminPW)
+
+	weak := []struct {
+		name string
+		pw   string
+	}{
+		{"too short", "Aa3"},
+		{"too long", "Aa1" + strings.Repeat("b", 62)},
+		{"no upper", "aa345678"},
+		{"no lower", "AA345678"},
+		{"no digit", "Abcdefgh"},
+		{"space", "Aa 345678"},
+		{"non-ascii", "密码Aa345678"},
+	}
+	for i, tc := range weak {
+		t.Run(tc.name, func(t *testing.T) {
+			user := "weakuser" + strconv.Itoa(i)
+			code := h.createInviteCode(adminToken)
+
+			rec := h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
+				InviteCode: code, Username: user, Password: tc.pw,
+			})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status %d, want 400 (%s)", rec.Code, rec.Body.String())
+			}
+			if got := decodeError(t, rec).Error; got != "validation_error" {
+				t.Errorf("error %q, want validation_error", got)
+			}
+			// No account was created.
+			if u, _ := h.store.Users().GetByUsername(ctx, user); u != nil {
+				t.Error("non-compliant registration must not create an account")
+			}
+			// The invite was NOT consumed: a compliant password through the same code succeeds.
+			if ok := h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
+				InviteCode: code, Username: user, Password: "Aa345678",
+			}); ok.Code != http.StatusCreated {
+				t.Fatalf("compliant retry on same code: status %d (%s)", ok.Code, ok.Body.String())
+			}
+		})
+	}
+
+	// No candidate password (compliant or not) reaches the logs.
+	logs := h.logBuf.String()
+	for _, secret := range []string{"Aa345678", "密码Aa345678"} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("password leaked into server logs: %q", secret)
+		}
+	}
+}
+
+// TestLoginNotGatedByPolicy covers US1 / FR-009: an account whose stored password
+// predates this policy (weaker than the new rules) is seeded directly through the
+// store layer and can still authenticate — login does not re-check complexity.
+func TestLoginNotGatedByPolicy(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	adminToken := h.loginToken("admin", h.adminPW)
+
+	// Seed a non-admin account whose password ("weakpw": 6 chars, no upper, no digit)
+	// would be rejected by the register handler, bypassing it via the store layer.
+	const weakPW = "weakpw"
+	hash, err := auth.HashPassword(weakPW)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	code := h.createInviteCode(adminToken)
+	if _, err := h.store.Register(ctx, "legacy", hash, code); err != nil {
+		t.Fatalf("seed legacy account: %v", err)
+	}
+
+	// The weak, pre-existing account still logs in (policy is not enforced at login).
+	if rec := h.do(http.MethodPost, "/api/v1/login", "", protocol.LoginRequest{
+		Username: "legacy", Password: weakPW,
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("legacy login status %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 // US4 — no secret reaches the logs across a register+login cycle.
 func TestNoSecretsInLogs(t *testing.T) {
 	h := newHarness(t)
 	adminToken := h.loginToken("admin", h.adminPW)
 	code := h.createInviteCode(adminToken)
-	const bobPw = "bobs-very-secret-pw"
+	const bobPw = "Bobsecret123"
 	h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
 		InviteCode: code, Username: "bob", Password: bobPw,
 	})

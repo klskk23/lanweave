@@ -19,6 +19,7 @@ import (
 	"lanweave/internal/client/panel"
 	"lanweave/internal/client/state"
 	"lanweave/internal/client/tunnel"
+	"lanweave/pkg/passwordpolicy"
 )
 
 // Wizard drives the first-run setup screens, binding the UI to the Fyne-free onboarding
@@ -126,11 +127,18 @@ func (z *Wizard) stepAuth() {
 	pass := widget.NewPasswordEntry()
 	pass.SetPlaceHolder(i18n.T("wizard.passwordPlaceholder"))
 
+	// A persistent description of the password rules sits beneath the password field. It is
+	// shown only when creating an account — the sole place the policy applies — and hidden on
+	// sign-in, like the invite row. (FR-008 / US3.)
+	hint := widget.NewLabel(i18n.T("wizard.pwRule.hint"))
+	hint.Wrapping = fyne.TextWrapWord
+
 	invite := widget.NewEntry()
 	invite.SetPlaceHolder(i18n.T("wizard.invitePlaceholder"))
 	inviteRow := container.NewVBox(widget.NewLabel(i18n.T("wizard.inviteLabel")), invite)
 	if z.mode == onboard.SignIn {
 		inviteRow.Hide()
+		hint.Hide()
 	}
 
 	// The radio options are localized for display; selection is compared against the same
@@ -140,9 +148,11 @@ func (z *Wizard) stepAuth() {
 		if s == createLabel {
 			z.mode = onboard.CreateAccount
 			inviteRow.Show()
+			hint.Show()
 		} else {
 			z.mode = onboard.SignIn
 			inviteRow.Hide()
+			hint.Hide()
 		}
 	})
 	if z.mode == onboard.CreateAccount {
@@ -152,16 +162,24 @@ func (z *Wizard) stepAuth() {
 	}
 
 	errLbl := widget.NewLabel("")
-	body := container.NewVBox(mode, inviteRow, widget.NewLabel(i18n.T("wizard.usernameLabel")), user, widget.NewLabel(i18n.T("wizard.passwordLabel")), pass, errLbl)
+	body := container.NewVBox(mode, inviteRow, widget.NewLabel(i18n.T("wizard.usernameLabel")), user, widget.NewLabel(i18n.T("wizard.passwordLabel")), pass, hint, errLbl)
 
 	z.render(i18n.T("wizard.accountTitle"), body, z.stepServer, func() {
 		if user.Text == "" || pass.Text == "" {
 			errLbl.SetText(i18n.T("wizard.credsRequired"))
 			return
 		}
-		if z.mode == onboard.CreateAccount && invite.Text == "" {
-			errLbl.SetText(i18n.T("wizard.inviteRequired"))
-			return
+		// The strength policy applies only when creating an account; sign-in must accept
+		// pre-existing (possibly weaker) passwords unchanged. (FR-009.)
+		if z.mode == onboard.CreateAccount {
+			if invite.Text == "" {
+				errLbl.SetText(i18n.T("wizard.inviteRequired"))
+				return
+			}
+			if reason, ok := passwordpolicy.Validate(pass.Text); !ok {
+				errLbl.SetText(i18n.T("wizard.pwRule." + reason.String()))
+				return
+			}
 		}
 		z.username, z.password, z.invite = user.Text, pass.Text, invite.Text
 		z.stepName()
