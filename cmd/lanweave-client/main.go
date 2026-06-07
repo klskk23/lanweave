@@ -46,7 +46,7 @@ func main() {
 	i18n.Init(a.Preferences().StringWithFallback("ui.language", ""), string(lang.SystemLocale()))
 	a.SetIcon(ui.AppIcon())
 	w := a.NewWindow("lanweave " + version)
-	w.Resize(fyne.NewSize(440, 380))
+	w.Resize(fyne.NewSize(440, 782)) // 9:16 portrait (mobile-style panel)
 
 	statePath, err := state.DefaultPath()
 	if err != nil {
