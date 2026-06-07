@@ -23,3 +23,8 @@ const DeviceKeyName = "lanweave-device-private-key"
 // SessionTokenName is the fixed name under which the user's session token is cached, so
 // the management panel can reuse it across launches without re-prompting (DESIGN §8).
 const SessionTokenName = "lanweave-session-token"
+
+// RefreshTokenName is the fixed name under which the long-lived refresh token is cached
+// (same DPAPI-backed store as the session token). It lets the client silently renew an
+// expired access token without re-prompting for the password (slice 024).
+const RefreshTokenName = "lanweave-refresh-token"

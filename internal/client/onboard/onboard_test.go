@@ -22,6 +22,7 @@ type fakeAPI struct {
 	serverInfo    protocol.ServerInfoResponse
 	serverInfoErr error
 	token         string // session token returned after a successful Login
+	refreshToken  string // refresh token returned after a successful Login
 
 	registerCalls     int
 	registerNodeCalls int
@@ -30,6 +31,7 @@ type fakeAPI struct {
 func (f *fakeAPI) Register(_, _, _ string) error { f.registerCalls++; return f.registerErr }
 func (f *fakeAPI) Login(_, _ string) error       { return f.loginErr }
 func (f *fakeAPI) Token() string                 { return f.token }
+func (f *fakeAPI) RefreshToken() string          { return f.refreshToken }
 func (f *fakeAPI) RegisterNode(name, pub string) (protocol.NodeResponse, error) {
 	f.registerNodeCalls++
 	if f.registerNode != nil {
@@ -108,6 +110,21 @@ func TestProvisionPersistsSession(t *testing.T) {
 	tok, err := fk.Get(keyring.SessionTokenName)
 	if err != nil || string(tok) != "tok-xyz" {
 		t.Errorf("session token not cached after provision: got %q err=%v, want %q", tok, err, "tok-xyz")
+	}
+}
+
+// TestProvisionPersistsRefreshToken covers US1: the refresh token returned by Login is
+// cached in the vault after a successful Provision, so the panel can silently renew later.
+func TestProvisionPersistsRefreshToken(t *testing.T) {
+	api := &fakeAPI{serverInfo: okServerInfo(), token: "tok-xyz", refreshToken: "rt-abc"}
+	p, fk, _ := newProvisioner(t, api)
+
+	if _, err := p.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "alice", Password: "pw"}, "laptop"); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	rt, err := fk.Get(keyring.RefreshTokenName)
+	if err != nil || string(rt) != "rt-abc" {
+		t.Errorf("refresh token not cached after provision: got %q err=%v, want %q", rt, err, "rt-abc")
 	}
 }
 

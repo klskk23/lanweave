@@ -104,6 +104,7 @@ zone 在服务端落地为 nftables set，是 forward 链上的允许规则。
 | `nodes`     | id, user_id, name, wg_pubkey UNIQUE, ip UNIQUE, created_at   | (user_id, name) UNIQUE                        |
 | `zones`     | id, name UNIQUE, password_hash, owner_user_id, created_at    | name 全局唯一                                 |
 | `zone_members` | zone_id, node_id, joined_at                               | 复合主键 (zone_id, node_id)                   |
+| `refresh_tokens` | id, user_id, token_hash UNIQUE, expires_at, revoked_at, created_at | 仅存 SHA-256 哈希；30 天滑动过期；`user_id` FK ON DELETE CASCADE（slice 024） |
 
 ### 4.2 约束
 - `nodes.name` 在 `(user_id, name)` 维度唯一；不同用户可重名。
@@ -204,11 +205,13 @@ table inet lanweave {
   - 不要提交到 git
   - 修改 admin 密码：改 TOML + 重启（接受风险）
 
-### 7.3 会话：JWT 无状态
-- 登录返回短期 JWT（1–2h），算法 HS256，密钥来自 TOML / 启动随机生成。
-- 客户端持有 access token，存 Windows credential manager / keyring（不要纯文件）。
-- **无吊销机制** —— 接受 1–2h 风险窗口。
-- 重启服务 = 换签名密钥 = 全用户被踢（运维知悉）。
+### 7.3 会话：短期 access JWT + 可吊销 refresh token（slice 024）
+- **Access token**：短期 JWT（1–2h），算法 HS256，密钥来自 TOML / 启动随机生成。无状态、不可吊销 —— 接受 1–2h 风险窗口。
+- **Refresh token（RT）**：登录额外返回一枚不透明随机串（`crypto/rand` 32B → base64url）。服务端只存其 SHA-256 哈希（高熵随机串，无需 argon2id），30 天**滑动**过期，每次成功续期把窗口推到 `now+30d`；不轮换、不做重放检测。
+- `/login` 返回 `{token, refresh_token}`；access token 过期时客户端用 RT 静默调 `/refresh` 换新 access token（懒刷新，401 后重试一次），用户无感。
+- 客户端把 access token 与 RT 都存 Windows credential manager / keyring（不要纯文件）。
+- **吊销**：`/logout` 吊销单枚 RT（幂等）；删用户经 FK 级联清掉其全部 RT。被吊销设备退回密码登录。
+- 重启服务 = 换签名密钥 = 所有 **access token** 失效，但 **RT 持久化在 DB**，客户端可立即用 RT 静默续期 —— 重启不再"全用户被踢"，仅造成一次自动刷新。
 
 ### 7.4 速率限制
 - MVP 仅在 API 中间件加全局 `golang.org/x/time/rate` 令牌桶（如 100 req/s）。
@@ -224,7 +227,9 @@ table inet lanweave {
 | 方法 | 路径               | 说明                                    |
 |------|--------------------|-----------------------------------------|
 | POST | `/api/v1/register` | body: {invite_code, username, password} |
-| POST | `/api/v1/login`    | body: {username, password} → {token}    |
+| POST | `/api/v1/login`    | body: {username, password} → {token, refresh_token} |
+| POST | `/api/v1/refresh`  | body: {refresh_token} → {token}；RT 鉴权（access JWT 此时已过期），滑动续期 |
+| POST | `/api/v1/logout`   | body: {refresh_token} → 204；吊销该 RT，幂等（未知/已吊销也 204，不作 oracle） |
 | GET  | `/api/v1/server`   | 返回 WG 公钥、endpoint、network、MTU 等  |
 
 ### 8.2 用户端点
@@ -380,7 +385,8 @@ max_owned_zones_per_user = 10   # 同上，仅统计本人创建（拥有）的 
 | 风险                                     | 缓解 / 文档要求                            |
 |------------------------------------------|--------------------------------------------|
 | TOML 中 admin 明文密码                   | `chmod 600`、不入 git、首次后建议改        |
-| JWT 不可吊销                             | 1–2h 短期过期；重启换密钥可全吊销          |
+| Access JWT 不可吊销                      | 1–2h 短期过期；吊销由 refresh token 层做（`/logout`、删用户级联）；重启换签名密钥仍即时使所有 access token 失效（但客户端可凭 RT 静默续期，不再"全用户被踢"） |
+| 客户端持有一枚长效（30 天滑动）refresh token（slice 024） | 仅存 DPAPI/keyring（非纯文件）；服务端只存 SHA-256 哈希、明文不入库不入日志（仅签发时一次性返回）；可经 `/logout` 或删用户即时吊销；丢失即等价一次 30 天窗口的会话泄露——以短 access TTL + 可吊销 RT 收敛，接受该取舍 |
 | 无账户级失败计数（仅全局限流）           | v1.1 补；上线后观察                        |
 | 跳过证书验证（`--insecure` CLI flag） | 仅 troubleshooting，完全不验证；状态于 App Bar overflow 菜单红色项「证书未验证」可见（feature 022：由常驻警示降级为菜单项，已接受的 UX 取舍）；UI 不暴露此开关 |
 | TOFU 信任自签 / 内网证书（feature 018 取代 017 会话级 opt-in） | 首次连接证书过不了系统 CA 时弹窗、显式信任、按 server 持久化叶证书 SHA-256 指纹；验证=指纹或系统 CA；证书变更弹更重警告并阻断、需显式接受；中性「已信任」项于 overflow 菜单（feature 022 改） |

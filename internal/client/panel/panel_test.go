@@ -29,12 +29,13 @@ var _ firewall.Control = (*fakeFirewall)(nil)
 
 // fakeAPI is a programmable stand-in for the REST client (our own seam).
 type fakeAPI struct {
-	token    string
-	loginErr error
-	meErr    error
-	nodes    protocol.NodeListResponse
-	zones    protocol.ZoneListResponse
-	members  protocol.ZoneMembersResponse
+	token        string
+	refreshToken string
+	loginErr     error
+	meErr        error
+	nodes        protocol.NodeListResponse
+	zones        protocol.ZoneListResponse
+	members      protocol.ZoneMembersResponse
 
 	joinedNodeID  int64
 	kickedNodeID  int64
@@ -44,11 +45,19 @@ type fakeAPI struct {
 
 	listNodesErr error
 	tokenSetTo   string
+	rtSetTo      string
+	logoutCalls  int
 }
 
-func (f *fakeAPI) Login(string, string) error { f.token = "fresh-token"; return f.loginErr }
-func (f *fakeAPI) Token() string              { return f.token }
-func (f *fakeAPI) SetToken(t string)          { f.token = t; f.tokenSetTo = t }
+func (f *fakeAPI) Login(string, string) error {
+	f.token = "fresh-token"
+	f.refreshToken = "fresh-rt"
+	return f.loginErr
+}
+func (f *fakeAPI) Token() string            { return f.token }
+func (f *fakeAPI) SetToken(t string)        { f.token = t; f.tokenSetTo = t }
+func (f *fakeAPI) RefreshToken() string     { return f.refreshToken }
+func (f *fakeAPI) SetRefreshToken(t string) { f.refreshToken = t; f.rtSetTo = t }
 func (f *fakeAPI) Me() (protocol.MeResponse, error) {
 	return protocol.MeResponse{UserID: 1, Username: "alice"}, f.meErr
 }
@@ -68,6 +77,7 @@ func (f *fakeAPI) ChangeZonePassword(string, string) error { return nil }
 func (f *fakeAPI) DeleteZone(string) error                 { return nil }
 func (f *fakeAPI) KickMember(_ string, nodeID int64) error { f.kickedNodeID = nodeID; return nil }
 func (f *fakeAPI) DeleteNode(nodeID int64) error           { f.deletedNodeID = nodeID; return f.deleteNodeErr }
+func (f *fakeAPI) Logout() error                           { f.logoutCalls++; return nil }
 
 func newController(t *testing.T, f *fakeAPI) (*panel.Controller, *keyring.Fake) {
 	t.Helper()
@@ -169,10 +179,15 @@ func TestLoadSessionAndSignIn(t *testing.T) {
 		t.Errorf("no token: need=%v err=%v, want need=true", need, err)
 	}
 
-	// Valid cached token (Me ok) → no sign in.
+	// Valid cached token (Me ok) → no sign in. The cached refresh token is restored into
+	// the client too, so an expired access token can be silently renewed mid-session.
 	_ = fk.Set(keyring.SessionTokenName, []byte("cached"))
+	_ = fk.Set(keyring.RefreshTokenName, []byte("cached-rt"))
 	if need, err := c.LoadSession(); err != nil || need {
 		t.Errorf("valid token: need=%v err=%v, want need=false", need, err)
+	}
+	if f.rtSetTo != "cached-rt" {
+		t.Errorf("LoadSession did not seed the cached refresh token: got %q", f.rtSetTo)
 	}
 
 	// Expired token (Me → ErrSessionExpired) → sign in needed.
@@ -181,12 +196,15 @@ func TestLoadSessionAndSignIn(t *testing.T) {
 		t.Errorf("expired token: need=%v err=%v, want need=true", need, err)
 	}
 
-	// SignIn caches the new token.
+	// SignIn caches both the new access token and the new refresh token.
 	if err := c.SignIn("alice", "pw"); err != nil {
 		t.Fatal(err)
 	}
 	if tok, err := fk.Get(keyring.SessionTokenName); err != nil || string(tok) != "fresh-token" {
 		t.Errorf("token not cached after sign-in: %q %v", tok, err)
+	}
+	if rt, err := fk.Get(keyring.RefreshTokenName); err != nil || string(rt) != "fresh-rt" {
+		t.Errorf("refresh token not cached after sign-in: %q %v", rt, err)
 	}
 }
 
@@ -206,6 +224,7 @@ func logoutFixture(t *testing.T, f *fakeAPI) (*panel.Controller, *keyring.Fake, 
 	t.Helper()
 	fk := keyring.NewFake()
 	_ = fk.Set(keyring.SessionTokenName, []byte("tok"))
+	_ = fk.Set(keyring.RefreshTokenName, []byte("rt"))
 	_ = fk.Set(keyring.DeviceKeyName, []byte("priv"))
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	if err := state.Save(statePath, state.Record{ServerURL: "https://s", NodeName: "laptop", IP: "100.127.0.2"}); err != nil {
@@ -219,6 +238,9 @@ func assertLocalCleared(t *testing.T, fk *keyring.Fake, statePath string) {
 	t.Helper()
 	if _, err := fk.Get(keyring.SessionTokenName); !errors.Is(err, keyring.ErrNotFound) {
 		t.Errorf("session token not cleared: %v", err)
+	}
+	if _, err := fk.Get(keyring.RefreshTokenName); !errors.Is(err, keyring.ErrNotFound) {
+		t.Errorf("refresh token not cleared: %v", err)
 	}
 	if _, err := fk.Get(keyring.DeviceKeyName); !errors.Is(err, keyring.ErrNotFound) {
 		t.Errorf("device key not cleared: %v", err)
@@ -248,6 +270,9 @@ func TestLogout(t *testing.T) {
 	}
 	if f.deletedNodeID != 42 {
 		t.Errorf("deleted node id = %d, want 42", f.deletedNodeID)
+	}
+	if f.logoutCalls != 1 {
+		t.Errorf("api.Logout called %d times, want 1 (server-side RT revoke)", f.logoutCalls)
 	}
 	assertLocalCleared(t, fk, sp)
 

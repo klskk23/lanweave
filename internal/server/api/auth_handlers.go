@@ -72,7 +72,78 @@ func (h *handlers) login(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, protocol.LoginResponse{Token: token})
+	refreshToken, err := h.store.RefreshTokens().Issue(r.Context(), u.ID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, protocol.LoginResponse{Token: token, RefreshToken: refreshToken})
+}
+
+// refresh exchanges a valid refresh token for a fresh access token, sliding the
+// refresh token's expiry. It is a public route authenticated by the RT in the body
+// (the access JWT is, by definition, expired at refresh time), never by the JWT.
+// The plaintext RT is never logged.
+func (h *handlers) refresh(w http.ResponseWriter, r *http.Request) {
+	var req protocol.RefreshRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", "Invalid request body.")
+		return
+	}
+	if req.RefreshToken == "" {
+		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", "A refresh token is required.")
+		return
+	}
+
+	userID, err := h.store.RefreshTokens().Validate(r.Context(), req.RefreshToken)
+	if err != nil {
+		if errors.Is(err, store.ErrRefreshInvalid) {
+			protocol.WriteJSONError(w, http.StatusUnauthorized, "invalid_refresh_token", "Refresh token is invalid or expired.")
+			return
+		}
+		h.serverError(w, err)
+		return
+	}
+
+	u, err := h.store.Users().GetByID(r.Context(), userID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	if u == nil {
+		// The owning user vanished between validate and lookup (e.g. deleted). Treat
+		// as an invalid refresh rather than minting a token for a ghost account.
+		protocol.WriteJSONError(w, http.StatusUnauthorized, "invalid_refresh_token", "Refresh token is invalid or expired.")
+		return
+	}
+
+	token, err := h.jwt.Issue(auth.Claims{UserID: u.ID, Username: u.Username, IsAdmin: u.IsAdmin})
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, protocol.RefreshResponse{Token: token})
+}
+
+// logout revokes a refresh token server-side. It is a public route (the access JWT may
+// already be expired) authenticated by the RT in the body. It always returns 204 for a
+// well-formed request — revoking an unknown or already-revoked token is a no-op — so it
+// is never an oracle for token state. A malformed/oversized body or missing field is 400.
+func (h *handlers) logout(w http.ResponseWriter, r *http.Request) {
+	var req protocol.LogoutRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", "Invalid request body.")
+		return
+	}
+	if req.RefreshToken == "" {
+		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", "A refresh token is required.")
+		return
+	}
+	if err := h.store.RefreshTokens().Revoke(r.Context(), req.RefreshToken); err != nil {
+		h.serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // me returns the authenticated identity straight from the verified token claims.

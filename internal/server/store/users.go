@@ -64,6 +64,33 @@ func (r *UserRepo) GetByUsername(ctx context.Context, username string) (*User, e
 	return &u, nil
 }
 
+// GetByID returns the matching user, or (nil, nil) when none exists. Used by the
+// refresh flow to mint a fresh access token for the refresh token's owner.
+func (r *UserRepo) GetByID(ctx context.Context, id int64) (*User, error) {
+	const q = `SELECT id, username, password_hash, is_admin, created_at
+	           FROM users WHERE id = ?`
+	var (
+		u         User
+		isAdmin   int
+		createdAt string
+	)
+	err := r.db.QueryRowContext(ctx, q, id).
+		Scan(&u.ID, &u.Username, &u.PasswordHash, &isAdmin, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get user %d: %w", id, err)
+	}
+	u.IsAdmin = isAdmin != 0
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse created_at for user %d: %w", id, err)
+	}
+	u.CreatedAt = t
+	return &u, nil
+}
+
 // CreateAdmin inserts a new admin user. It returns ErrUserExists if the username
 // is already taken (the unique constraint is the authority, making this race-safe).
 func (r *UserRepo) CreateAdmin(ctx context.Context, username, passwordHash string) (*User, error) {

@@ -6,9 +6,28 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
-// LoginResponse carries the issued session token.
+// LoginResponse carries the issued session token plus the long-lived refresh
+// token used to silently renew the session without re-entering the password.
 type LoginResponse struct {
+	Token        string `json:"token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+// RefreshRequest is the body of POST /api/v1/refresh. It carries the opaque
+// refresh token; the (expired) access token does not gate this endpoint.
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+// RefreshResponse carries a freshly minted access token.
+type RefreshResponse struct {
 	Token string `json:"token"`
+}
+
+// LogoutRequest is the body of POST /api/v1/logout. It carries the refresh
+// token to revoke; revocation is idempotent.
+type LogoutRequest struct {
+	RefreshToken string `json:"refresh_token"`
 }
 
 // RegisterRequest is the body of POST /api/v1/register.
