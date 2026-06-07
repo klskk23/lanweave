@@ -109,10 +109,10 @@ func trustPool(cert *x509.Certificate) *x509.CertPool {
 func onboardUser(t *testing.T, url string, pool *x509.CertPool, invite, username, devName string) (*panel.Controller, *apiclient.Client) {
 	t.Helper()
 	c := apiclient.New(url, apiclient.WithRootCAs(pool))
-	if err := c.Register(invite, username, "password123"); err != nil {
+	if err := c.Register(invite, username, "Password123"); err != nil {
 		t.Fatalf("register %s: %v", username, err)
 	}
-	if err := c.Login(username, "password123"); err != nil {
+	if err := c.Login(username, "Password123"); err != nil {
 		t.Fatalf("login %s: %v", username, err)
 	}
 	k, _ := wgtypes.GeneratePrivateKey()
@@ -273,10 +273,10 @@ func TestPanelIntegrationLogout(t *testing.T) {
 	// Onboard alice with a real device key + session token in the keyring and a real state
 	// file, so logout's local clears are observable.
 	c := apiclient.New(url, apiclient.WithRootCAs(pool))
-	if err := c.Register(mint(), "alice", "password123"); err != nil {
+	if err := c.Register(mint(), "alice", "Password123"); err != nil {
 		t.Fatalf("register alice: %v", err)
 	}
-	if err := c.Login("alice", "password123"); err != nil {
+	if err := c.Login("alice", "Password123"); err != nil {
 		t.Fatalf("login alice: %v", err)
 	}
 	k, _ := wgtypes.GeneratePrivateKey()
@@ -353,10 +353,10 @@ func TestLogoutCleanRemovesAndRevokes(t *testing.T) {
 	pool := trustPool(cert)
 
 	c := apiclient.New(url, apiclient.WithRootCAs(pool))
-	if err := c.Register(mint(), "alice", "password123"); err != nil {
+	if err := c.Register(mint(), "alice", "Password123"); err != nil {
 		t.Fatalf("register alice: %v", err)
 	}
-	if err := c.Login("alice", "password123"); err != nil {
+	if err := c.Login("alice", "Password123"); err != nil {
 		t.Fatalf("login alice: %v", err)
 	}
 	k, _ := wgtypes.GeneratePrivateKey()

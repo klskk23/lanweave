@@ -74,9 +74,9 @@ func TestInviteEndpointsAuthz(t *testing.T) {
 	// Register a non-admin and log in as them.
 	code := h.createInviteCode(adminToken)
 	h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
-		InviteCode: code, Username: "bob", Password: "bobs-strong-pw",
+		InviteCode: code, Username: "bob", Password: "Bobpass123",
 	})
-	bobToken := h.loginToken("bob", "bobs-strong-pw")
+	bobToken := h.loginToken("bob", "Bobpass123")
 
 	// Non-admin → 403 on both invite endpoints.
 	if rec := h.do(http.MethodPost, "/api/v1/admin/invites", bobToken, nil); rec.Code != http.StatusForbidden {

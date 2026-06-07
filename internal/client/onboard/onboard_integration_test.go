@@ -112,7 +112,7 @@ func TestOnboardIntegrationCreateAccount(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "lanweave", "state.json")
 	p := &onboard.Provisioner{API: client, Keys: fk, StatePath: statePath, ServerURL: url}
 
-	rec, err := p.Provision(onboard.Credentials{Mode: onboard.CreateAccount, Invite: invite, Username: "alice", Password: "password123"}, "laptop")
+	rec, err := p.Provision(onboard.Credentials{Mode: onboard.CreateAccount, Invite: invite, Username: "alice", Password: "Password123"}, "laptop")
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestOnboardIntegrationSignIn(t *testing.T) {
 
 	// First, create the account + a device.
 	first := &onboard.Provisioner{API: apiclient.New(url, apiclient.WithRootCAs(pool)), Keys: keyring.NewFake(), StatePath: filepath.Join(t.TempDir(), "s1.json"), ServerURL: url}
-	if _, err := first.Provision(onboard.Credentials{Mode: onboard.CreateAccount, Invite: invite, Username: "bob", Password: "password123"}, "laptop"); err != nil {
+	if _, err := first.Provision(onboard.Credentials{Mode: onboard.CreateAccount, Invite: invite, Username: "bob", Password: "Password123"}, "laptop"); err != nil {
 		t.Fatalf("setup create-account: %v", err)
 	}
 
@@ -153,7 +153,7 @@ func TestOnboardIntegrationSignIn(t *testing.T) {
 	secondClient := apiclient.New(url, apiclient.WithRootCAs(pool))
 	secondKeys := keyring.NewFake()
 	second := &onboard.Provisioner{API: secondClient, Keys: secondKeys, StatePath: filepath.Join(t.TempDir(), "s2.json"), ServerURL: url}
-	rec, err := second.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "bob", Password: "password123"}, "desktop")
+	rec, err := second.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "bob", Password: "Password123"}, "desktop")
 	if err != nil {
 		t.Fatalf("sign-in provision: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestColdStartReusesSession(t *testing.T) {
 	fk := keyring.NewFake()
 	statePath := filepath.Join(t.TempDir(), "lanweave", "state.json")
 	p := &onboard.Provisioner{API: apiclient.New(url, apiclient.WithRootCAs(pool)), Keys: fk, StatePath: statePath, ServerURL: url}
-	if _, err := p.Provision(onboard.Credentials{Mode: onboard.CreateAccount, Invite: invite, Username: "carol", Password: "password123"}, "laptop"); err != nil {
+	if _, err := p.Provision(onboard.Credentials{Mode: onboard.CreateAccount, Invite: invite, Username: "carol", Password: "Password123"}, "laptop"); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 

@@ -37,6 +37,7 @@
 | 024 | session-refresh-tokens                   | 服务端/客户端 | 002, 009, 019 | 登录返回 access + refresh token;access 2h 过期时客户端用 refresh token 静默换新,不再每 2h 弹密码;RT 30天滑动、服务端存哈希可逐条吊销 |
 | 025 | client-logout-hardening                  | 客户端     | 017, 024   | 退出登录时服务器 API 网络不可达(3 次 1s 重试仍失败)则阻止退出 + 弹窗(取消 / 强制退出逃生口),避免残留孤儿 node;登出额外吊销本设备 RT |
 | 026 | invite-expiry                            | 服务端     | 002        | 邀请码有有效期:配置 `invite_ttl` 全局默认 24h,建码时写 `expires_at=created_at+ttl`;`0`/空 与旧码=NULL=永不过期;过期码注册被拒并归入通用「邀请码无效」 |
+| 027 | password-complexity                      | 服务端/客户端 | 002, 009   | 账号密码复杂度:8–64 ASCII 字符,至少含大写+小写+数字,无空格/非 ASCII;共享 `pkg/passwordpolicy` 单一真源,服务端注册时权威拦截(`validation_error`),客户端向导本地逐条提示+常驻规则说明;**仅注册生效**,登录不校验(旧弱密码/bootstrap admin 不受影响);zone 密码范围外 |
 
 ---
 
@@ -650,6 +651,37 @@
 **依赖 / 关联**
 - 002（`invites` 表、admin 建码端点、`register` 校验点）。
 - 023（`[limits]` 配置段处理 `*int`「未写 vs 显式 0」的先例，`invite_ttl` 的「空 vs 0」可借鉴同一思路）。
+
+---
+
+### 027 — password-complexity
+**背景**
+- 现状：注册仅校验密码长度 ≥ 8（`register` 里 `minPasswordLen`），不要求字符多样性，弱口令（如 `password`、`12345678`）可直接建号。
+- 需求：账号密码加复杂度规则——至少 8 字符、含大小写字母和数字——客户端与服务端都校验。grill 阶段定下：仅约束**账号密码**、不强制特殊字符、设 64 上限、拒绝任何空格与非 ASCII（中文密码无大小写概念，整体拒绝而非部分接受）。
+
+**范围**
+- **规则**：8–64 个字符；至少各一个 ASCII 大写、小写、数字；仅 ASCII 可打印（`!`–`~`），空格 / 控制符 / 非 ASCII 一律拒绝；ASCII 符号允许但不强制。
+- **单一真源**：新增共享包 `pkg/passwordpolicy`，纯函数 `Validate(pw) (Reason, bool)` 返回**类型化失败原因**（charset → length → upper → lower → digit 固定顺序，charset 优先以免非法字符伪装成「缺数字」）。服务端 `register` 与客户端 Fyne 向导共用，判定永不漂移（结构性满足 FR-006）。
+- **服务端权威**：`register` 在用户名校验后、邀请码校验前调 `Validate`；不合规返回 `validation_error`/400，英文消息（相关原因合并：短/长→一条「8-64 characters」，三类缺失→一条「uppercase, lowercase, and a digit」）。**登录不校验**——早于本策略的弱密码账户及 bootstrap admin 仍可登录。
+- **客户端**：向导「创建账户」步骤本地拦截提交，按类型化原因渲染对应**本地化逐条提示**；密码框下方常驻一条规则说明（输入前即可见）。登录步骤不拦截。
+- **范围外**：zone 密码、配置文件 bootstrap admin 明文密码不受约束，行为不变。哈希仍 argon2id，64 上限是防御性输入上界、非哈希硬限制。
+
+**DESIGN.md 修订（宪法强制，同 PR）**
+- §7 认证与权限新增 §7.5：账号密码复杂度规则、单一真源、仅注册生效、登录与 zone/bootstrap 豁免。
+
+**验收**
+- 服务端集成测试（真 SQLite，`unshare -rUn`，宪法 II 不 mock）：逐个失败原因（缺大写 / 小写 / 数字、7 字符、65 字符、含空格、非 ASCII）注册各被拒（400 `validation_error`、不建号、邀请码不消耗），合规密码建号成功；store 层种入的弱密码账户仍可登录。
+- 客户端向导测试（`gui` tag）：创建账户模式下非合规密码不前进并显示对应原因提示，合规前进；登录模式不受策略影响；规则说明在输入前可见、登录模式隐藏。
+- `pkg/passwordpolicy` 表驱动单测覆盖每个原因、边界 7/8/64/65、charset 优先顺序。
+
+**不做**
+- 改密端点 / 强制改旧密码 / 追溯作废存量弱密码（登录不 gated）。
+- zone 密码、bootstrap admin 密码复杂度。
+- 强制特殊字符、密码强度评分 / 字典检测 / 历史复用检测。
+
+**依赖 / 关联**
+- 002（`register` 校验点、`invites`/邀请码）。
+- 009（客户端向导 `stepAuth` 创建账户表单、i18n）。
 
 ---
 
