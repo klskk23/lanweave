@@ -3,6 +3,7 @@ package api_test
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"lanweave/pkg/protocol"
 )
@@ -25,6 +26,44 @@ func TestAdminCreateAndListInvites(t *testing.T) {
 	}
 	if list.Invites[0].Code != code || list.Invites[0].Status != "unused" {
 		t.Errorf("unexpected invite item: %+v", list.Invites[0])
+	}
+}
+
+// TestCreateInviteExpiry — with invite_ttl>0 the create response carries an
+// expires_at ≈ now+TTL; with expiry disabled the field is omitted (FR-009 / SC-006).
+func TestCreateInviteExpiry(t *testing.T) {
+	h := newHarnessOpts(t, 24*time.Hour)
+	adminToken := h.loginToken("admin", h.adminPW)
+
+	before := time.Now().UTC()
+	rec := h.do(http.MethodPost, "/api/v1/admin/invites", adminToken, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp protocol.CreateInviteResponse
+	decodeJSONBody(t, rec.Body.Bytes(), &resp)
+	if resp.ExpiresAt == nil {
+		t.Fatal("expected expires_at when invite_ttl>0")
+	}
+	exp, err := time.Parse(time.RFC3339, *resp.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse expires_at %q: %v", *resp.ExpiresAt, err)
+	}
+	if exp.Before(before.Add(23*time.Hour)) || exp.After(time.Now().UTC().Add(25*time.Hour)) {
+		t.Errorf("expires_at %v not ≈ now+24h", exp)
+	}
+
+	// Expiry disabled → the response omits expires_at.
+	h2 := newHarnessOpts(t, 0)
+	adminToken2 := h2.loginToken("admin", h2.adminPW)
+	rec2 := h2.do(http.MethodPost, "/api/v1/admin/invites", adminToken2, nil)
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("create (disabled) status %d: %s", rec2.Code, rec2.Body.String())
+	}
+	var resp2 protocol.CreateInviteResponse
+	decodeJSONBody(t, rec2.Body.Bytes(), &resp2)
+	if resp2.ExpiresAt != nil {
+		t.Errorf("expected no expires_at when disabled, got %v", *resp2.ExpiresAt)
 	}
 }
 

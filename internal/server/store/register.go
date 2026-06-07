@@ -41,9 +41,14 @@ func (s *Store) Register(ctx context.Context, username, passwordHash, code strin
 		return nil, fmt.Errorf("last insert id: %w", err)
 	}
 
+	// The expires_at predicate folds an expired code into the same RowsAffected==0
+	// path as an unknown or already-used code: all three yield ErrInviteInvalid with
+	// no way for the caller to tell them apart. NULL expires_at never matches the
+	// comparison, so grandfathered and never-expire codes always pass the time check.
+	nowStr := now.Format(time.RFC3339)
 	upd, err := tx.ExecContext(ctx,
-		`UPDATE invites SET used_by_user_id = ?, used_at = ? WHERE code = ? AND used_at IS NULL`,
-		uid, now.Format(time.RFC3339), code)
+		`UPDATE invites SET used_by_user_id = ?, used_at = ? WHERE code = ? AND used_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
+		uid, nowStr, code, nowStr)
 	if err != nil {
 		return nil, fmt.Errorf("consume invite: %w", err)
 	}

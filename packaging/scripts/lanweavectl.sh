@@ -90,11 +90,19 @@ auth() {
 
 cmd_invite() {
     auth
-    local code
-    code=$(curl -sk --max-time 10 -X POST "$BASE_URL/admin/invites" \
-        -H "Authorization: Bearer $AUTH_TOKEN" | jq -r '.code // empty') || true
+    local resp code expires
+    resp=$(curl -sk --max-time 10 -X POST "$BASE_URL/admin/invites" \
+        -H "Authorization: Bearer $AUTH_TOKEN") || true
+    code=$(printf '%s' "$resp" | jq -r '.code // empty')
     [ -n "$code" ] || die "failed to create invite code"
+    # expires_at is omitted when the code never expires.
+    expires=$(printf '%s' "$resp" | jq -r '.expires_at // empty')
     printf 'Invite code: \033[32m%s\033[0m\n' "$code"
+    if [ -n "$expires" ]; then
+        printf 'Expires: %s\n' "$expires"
+    else
+        printf 'Expires: never\n'
+    fi
 }
 
 cmd_user_list() {

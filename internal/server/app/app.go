@@ -102,6 +102,16 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	jwtMgr := auth.NewJWTManager(cfg.Auth.JWTSecret.Reveal(), jwtTTL)
 
+	// invite_ttl has no default: empty means never-expire (zero duration). Validate
+	// has already rejected a non-empty value that fails to parse or is negative.
+	var inviteTTL time.Duration
+	if cfg.Auth.InviteTTL != "" {
+		inviteTTL, err = time.ParseDuration(cfg.Auth.InviteTTL)
+		if err != nil {
+			return fmt.Errorf("invalid auth.invite_ttl: %w", err)
+		}
+	}
+
 	limiter := rate.NewLimiter(rate.Limit(cfg.RateLimit.RPS), cfg.RateLimit.Burst)
 	handler := api.NewRouter(api.Options{
 		Version:              opts.Version,
@@ -115,6 +125,7 @@ func Run(ctx context.Context, opts Options) error {
 		JWT:                  jwtMgr,
 		MaxDevicesPerUser:    *cfg.Limits.MaxDevicesPerUser,
 		MaxOwnedZonesPerUser: *cfg.Limits.MaxOwnedZonesPerUser,
+		InviteTTL:            inviteTTL,
 	})
 
 	srv := &http.Server{

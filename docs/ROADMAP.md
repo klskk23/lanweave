@@ -1,6 +1,6 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化），021 为服务端可选明文 HTTP 监听（供反向代理终止 TLS），022 为客户端主页面与 Wizard 视觉改版（按 `UI-DESIGN.md`/`UI-example.png`，Material 3 启发的深色 flat 风格）；023 为每用户设备 / 拥有-zone 配额上限（配置文件全局值，默认各 10，0=无限制，admin 豁免）；024 为会话 refresh token（登录发 access+refresh，access 2h 过期客户端用 refresh token 静默换新，不再每 2h 重输密码；RT 30天滑动、服务端存哈希可吊销）；025 为退出登录加固（服务器网络不可达时阻止退出以避免残留孤儿 node，含「强制退出」逃生口，登出吊销本设备 refresh token）。
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化），021 为服务端可选明文 HTTP 监听（供反向代理终止 TLS），022 为客户端主页面与 Wizard 视觉改版（按 `UI-DESIGN.md`/`UI-example.png`，Material 3 启发的深色 flat 风格）；023 为每用户设备 / 拥有-zone 配额上限（配置文件全局值，默认各 10，0=无限制，admin 豁免）；024 为会话 refresh token（登录发 access+refresh，access 2h 过期客户端用 refresh token 静默换新，不再每 2h 重输密码；RT 30天滑动、服务端存哈希可吊销）；025 为退出登录加固（服务器网络不可达时阻止退出以避免残留孤儿 node，含「强制退出」逃生口，登出吊销本设备 refresh token）；026 为邀请码有效期（admin 邀请码默认 24h 过期，由配置 `invite_ttl` 控制，`0`/空=永不过期；旧码祖父化永久有效；过期码注册被拒并归入通用「邀请码无效」）。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -36,6 +36,7 @@
 | 023 | per-user-limits ✅                       | 服务端/客户端 | 002, 004, 005, 020 | 每用户设备数 + 拥有-zone 数配额(配置全局值,默认各 10,0=无限,admin 豁免);超限 409,删除释放名额,下调上限只挡新增 |
 | 024 | session-refresh-tokens                   | 服务端/客户端 | 002, 009, 019 | 登录返回 access + refresh token;access 2h 过期时客户端用 refresh token 静默换新,不再每 2h 弹密码;RT 30天滑动、服务端存哈希可逐条吊销 |
 | 025 | client-logout-hardening                  | 客户端     | 017, 024   | 退出登录时服务器 API 网络不可达(3 次 1s 重试仍失败)则阻止退出 + 弹窗(取消 / 强制退出逃生口),避免残留孤儿 node;登出额外吊销本设备 RT |
+| 026 | invite-expiry                            | 服务端     | 002        | 邀请码有有效期:配置 `invite_ttl` 全局默认 24h,建码时写 `expires_at=created_at+ttl`;`0`/空 与旧码=NULL=永不过期;过期码注册被拒并归入通用「邀请码无效」 |
 
 ---
 
@@ -614,6 +615,41 @@
 
 **依赖 / 关联**
 - 017（退出登录编排、`DeleteNode`、`confirmLogout`）、024（refresh-token 吊销端点 + 惰性刷新使 401 分支基本消失）、018（防火墙拆除在登出路径）。
+
+---
+
+### 026 — invite-expiry
+**背景**
+- 现状：邀请码**一次性、无过期**（DESIGN §7.1），仅 admin 签发。admin 当面 / 带内交付的码永久有效——丢失 / 泄露 / 截图转发的码任何时刻都能拿去注册，缺一道时效收口。
+- 需求：给邀请码加有效期，默认 24h，由配置文件全局控制；到期作废。grill 阶段从一个更大的「SMTP 邮件自助注册」设想里剥离出来的独立、最小可成片的那块——本切片**只做有效期**，不含邮件 / 自助注册。
+
+**范围**
+- **配置（全局默认，无 per-code 参数）**：`[auth]` 段新增 `invite_ttl`（duration 字符串，如 `"24h"`）。沿用 023 `[limits]` 处理「未写 vs 显式 0」的先例区分 `0`/空：`0` 或留空 = 永不过期。建码 API / `lanweavectl invite` **不加任何 TTL 参数**。`config.toml.example` 写 `invite_ttl = "24h"`（**开箱启用**）。
+- **数据模型**：`invites` 加可空列 `expires_at`。建码时若 `invite_ttl > 0` 写 `created_at + invite_ttl`，否则写 `NULL`。`created_by_user_id` 不变（仍 admin 签发）。**`NULL = 永不过期**——三处自洽：旧码 NULL 祖父化、`invite_ttl=0`/空写 NULL 当全局开关、校验只判 `expires_at IS NOT NULL AND expires_at < now()`。
+- **存量兼容**：迁移**只加列**，已有未用旧码 `expires_at` 默认 NULL → 自动祖父化、永久有效，**不追溯作废**。上线对现存码零影响，过期仅对「配了 ttl 之后新建的码」生效。
+- **注册校验**：`register` 校验邀请码时，过期（`expires_at` 非空且早于 now）**归入现有「邀请码无效」笼统错误**——不单独区分「过期」与「不存在 / 已用」，不泄露码是否曾存在。
+- **admin 可见性**：`lanweavectl invite`（建码）**输出带过期时间**（如 `过期: 2026-06-08 14:30 UTC`，或永久码标「永不过期」），便于 admin 当场告知对方时限。**不新增** invite list 命令。
+- **过期码清理**：过期未用码**留库不删**——注册时拒绝即可，留作审计痕迹，零成本。**不加后台清理任务**。
+
+**DESIGN.md 修订（宪法强制，同 PR）**
+- §7.1：「邀请码一次性、无过期」改为「邀请码一次性；**默认 24h 过期**，有效期由 `invite_ttl` 配置（`0`/空 = 永不过期）；`expires_at` 为 NULL 即永久有效」。
+- §4 数据表：`invites` 加 `expires_at`（可空）列。
+
+**验收**
+- 配 `invite_ttl="24h"`：新建码 24h 内可注册成功，超 24h 注册被拒并报通用「邀请码无效」；`invite_ttl=0`/空 → 新建码永久有效；旧码（迁移前已存在、无 `expires_at`）迁移后仍永久有效。
+- `lanweavectl invite` 建码输出含过期时间（或「永不过期」）。
+- 服务端集成测试（真 SQLite，`unshare -rUn`，宪法 II 不 mock）：未过期码注册成功、过期码被拒、NULL（永久）码注册成功、旧行迁移后祖父化各 ≥1 例。
+
+**不做**
+- per-code TTL（admin 建码逐个指定有效期）——本期只做全局统一值。
+- 区分「过期」与「无效」的差异化错误文案 / 提示。
+- 过期码后台清理任务 / `invite list` 命令。
+- **SMTP 邮件自助注册 / 邮件投递邀请码 / web 注册页 / URL scheme 深链**——本切片明确剔除，留作后续独立评估。
+- 追溯给存量旧码回填过期 / 作废存量未用码。
+
+**依赖 / 关联**
+- 002（`invites` 表、admin 建码端点、`register` 校验点）。
+- 023（`[limits]` 配置段处理 `*int`「未写 vs 显式 0」的先例，`invite_ttl` 的「空 vs 0」可借鉴同一思路）。
 
 ---
 

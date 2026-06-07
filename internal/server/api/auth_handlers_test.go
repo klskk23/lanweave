@@ -1,12 +1,14 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 
@@ -288,6 +290,50 @@ func TestRegisterRejections(t *testing.T) {
 	})
 	if rec.Code != http.StatusConflict || decodeError(t, rec).Error != "username_taken" {
 		t.Fatalf("taken username: status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRegisterExpiredCodeIndistinguishable — an expired invite code is rejected at
+// registration with a response byte-identical to the unknown-code rejection: the
+// registrant cannot tell expiry apart from any other invalid code (FR-003 / SC-005).
+func TestRegisterExpiredCodeIndistinguishable(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	admin, err := h.store.Users().GetByUsername(ctx, "admin")
+	if err != nil || admin == nil {
+		t.Fatalf("get admin: %v", err)
+	}
+	// Seed an unused code already past its expiry (past-dated row, no sleep).
+	now := time.Now().UTC().Format(time.RFC3339)
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if _, err := h.store.DB().ExecContext(ctx,
+		`INSERT INTO invites (code, created_by_user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+		"expired-code", admin.ID, now, past); err != nil {
+		t.Fatalf("seed expired invite: %v", err)
+	}
+
+	expired := h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
+		InviteCode: "expired-code", Username: "bob", Password: "bobs-strong-pw",
+	})
+	unknown := h.do(http.MethodPost, "/api/v1/register", "", protocol.RegisterRequest{
+		InviteCode: "no-such-code", Username: "carol", Password: "carols-strong-pw",
+	})
+
+	if expired.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expired status %d, want 422 (%s)", expired.Code, expired.Body.String())
+	}
+	if expired.Code != unknown.Code {
+		t.Errorf("expired status %d != unknown status %d", expired.Code, unknown.Code)
+	}
+	if expired.Body.String() != unknown.Body.String() {
+		t.Errorf("expired body %q must equal unknown body %q", expired.Body.String(), unknown.Body.String())
+	}
+	if got := decodeError(t, expired).Error; got != "invite_invalid" {
+		t.Errorf("expired error %q, want invite_invalid", got)
+	}
+	if u, _ := h.store.Users().GetByUsername(ctx, "bob"); u != nil {
+		t.Error("expired code must not create an account")
 	}
 }
 

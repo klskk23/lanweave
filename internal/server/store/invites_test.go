@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"lanweave/internal/server/store"
 )
@@ -29,11 +30,11 @@ func TestInviteCreateAndList(t *testing.T) {
 		t.Fatalf("create admin: %v", err)
 	}
 
-	c1, err := st.Invites().Create(ctx, admin.ID)
+	c1, _, err := st.Invites().Create(ctx, admin.ID, 0)
 	if err != nil {
 		t.Fatalf("create invite: %v", err)
 	}
-	c2, err := st.Invites().Create(ctx, admin.ID)
+	c2, _, err := st.Invites().Create(ctx, admin.ID, 0)
 	if err != nil {
 		t.Fatalf("create invite 2: %v", err)
 	}
@@ -62,11 +63,76 @@ func TestInviteCreateAndList(t *testing.T) {
 	}
 }
 
+// TestInviteCreateStampsExpiry — Create with a positive ttl stamps expires_at =
+// created_at + ttl, returns the matching pointer, and persists it (FR-001).
+func TestInviteCreateStampsExpiry(t *testing.T) {
+	st := newStoreT(t)
+	ctx := context.Background()
+	admin, err := st.Users().CreateAdmin(ctx, "admin", "hash")
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+
+	before := time.Now().UTC().Truncate(time.Second)
+	code, exp, err := st.Invites().Create(ctx, admin.ID, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if exp == nil {
+		t.Fatal("expected non-nil expiry for ttl>0")
+	}
+	if exp.Before(before.Add(24*time.Hour-time.Second)) || exp.After(time.Now().UTC().Add(24*time.Hour+time.Second)) {
+		t.Errorf("expiry %v not ≈ created_at+24h", exp)
+	}
+
+	list, err := st.Invites().List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var found *store.Invite
+	for i := range list {
+		if list[i].Code == code {
+			found = &list[i]
+		}
+	}
+	if found == nil || found.ExpiresAt == nil {
+		t.Fatalf("created invite should carry expires_at: %+v", found)
+	}
+	if !found.ExpiresAt.Equal(*exp) {
+		t.Errorf("persisted expires_at %v != returned %v", found.ExpiresAt, exp)
+	}
+}
+
+// TestInviteCreateNoTTLNeverExpires — Create with ttl<=0 returns a nil expiry and
+// stores a NULL expires_at (FR-005).
+func TestInviteCreateNoTTLNeverExpires(t *testing.T) {
+	st := newStoreT(t)
+	ctx := context.Background()
+	admin, err := st.Users().CreateAdmin(ctx, "admin", "hash")
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+
+	code, exp, err := st.Invites().Create(ctx, admin.ID, 0)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if exp != nil {
+		t.Errorf("ttl=0 must return a nil expiry, got %v", exp)
+	}
+	list, _ := st.Invites().List(ctx)
+	for _, inv := range list {
+		if inv.Code == code && inv.ExpiresAt != nil {
+			t.Errorf("ttl=0 invite must have NULL expires_at, got %v", inv.ExpiresAt)
+		}
+	}
+}
+
 func TestInviteListSurvivesDeletedCreator(t *testing.T) {
 	st := newStoreT(t)
 	ctx := context.Background()
 	admin, _ := st.Users().CreateAdmin(ctx, "admin", "hash")
-	if _, err := st.Invites().Create(ctx, admin.ID); err != nil {
+	if _, _, err := st.Invites().Create(ctx, admin.ID, 0); err != nil {
 		t.Fatalf("create invite: %v", err)
 	}
 

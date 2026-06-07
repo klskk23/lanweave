@@ -36,7 +36,7 @@ func TestUserDeleteCascade(t *testing.T) {
 	if err := st.Zones().Join(ctx, bz.ID, n2.ID); err != nil { // alice's node in bob's zone
 		t.Fatal(err)
 	}
-	if _, err := st.Invites().Create(ctx, alice); err != nil {
+	if _, _, err := st.Invites().Create(ctx, alice, 0); err != nil {
 		t.Fatal(err)
 	}
 

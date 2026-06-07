@@ -15,12 +15,17 @@ func (h *handlers) createInvite(w http.ResponseWriter, r *http.Request) {
 		protocol.WriteJSONError(w, http.StatusUnauthorized, "unauthorized", "Authentication required.")
 		return
 	}
-	code, err := h.store.Invites().Create(r.Context(), id.UserID)
+	code, expiresAt, err := h.store.Invites().Create(r.Context(), id.UserID, h.inviteTTL)
 	if err != nil {
 		h.serverError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, protocol.CreateInviteResponse{Code: code})
+	resp := protocol.CreateInviteResponse{Code: code}
+	if expiresAt != nil {
+		s := expiresAt.Format(time.RFC3339)
+		resp.ExpiresAt = &s
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 // listInvites returns all invites, newest first.
@@ -38,12 +43,22 @@ func (h *handlers) listInvites(w http.ResponseWriter, r *http.Request) {
 }
 
 func toInviteListItem(inv store.Invite) protocol.InviteListItem {
+	// Status precedence: a redeemed code is "used" regardless of expiry; an unused
+	// code past its expiry moment is "expired"; otherwise "unused". A NULL
+	// expires_at never counts as expired.
 	status := "unused"
 	var usedAt *string
 	if inv.UsedAt != nil {
 		status = "used"
 		s := inv.UsedAt.Format(time.RFC3339)
 		usedAt = &s
+	} else if inv.ExpiresAt != nil && inv.ExpiresAt.Before(time.Now()) {
+		status = "expired"
+	}
+	var expiresAt *string
+	if inv.ExpiresAt != nil {
+		s := inv.ExpiresAt.Format(time.RFC3339)
+		expiresAt = &s
 	}
 	return protocol.InviteListItem{
 		Code:      inv.Code,
@@ -52,5 +67,6 @@ func toInviteListItem(inv store.Invite) protocol.InviteListItem {
 		CreatedAt: inv.CreatedAt.Format(time.RFC3339),
 		UsedBy:    inv.UsedByName,
 		UsedAt:    usedAt,
+		ExpiresAt: expiresAt,
 	}
 }

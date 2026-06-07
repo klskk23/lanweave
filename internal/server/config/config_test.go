@@ -49,6 +49,8 @@ func TestValidateFailures(t *testing.T) {
 		{"bad cidr", func(c *config.Config) { c.WireGuard.Network = "100.127.0.0/x" }, "wireguard.network"},
 		{"short jwt secret", func(c *config.Config) { c.Auth.JWTSecret = config.Secret("short") }, "auth.jwt_secret"},
 		{"bad ttl", func(c *config.Config) { c.Auth.JWTTTL = "2weeks" }, "auth.jwt_ttl"},
+		{"bad invite_ttl", func(c *config.Config) { c.Auth.InviteTTL = "2weeks" }, "auth.invite_ttl"},
+		{"negative invite_ttl", func(c *config.Config) { c.Auth.InviteTTL = "-1h" }, "auth.invite_ttl"},
 		{"missing admin user", func(c *config.Config) { c.Admin.Username = "" }, "admin.username"},
 		{"missing admin pw", func(c *config.Config) { c.Admin.Password = config.Secret("") }, "admin.password"},
 	}
@@ -64,6 +66,21 @@ func TestValidateFailures(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantSub)
 			}
 		})
+	}
+}
+
+// TestInviteTTLValidation — invite_ttl is optional (empty = never expire) and a
+// normal duration validates; the rejection cases live in TestValidateFailures.
+func TestInviteTTLValidation(t *testing.T) {
+	c := validConfig(t)
+	c.Auth.InviteTTL = "" // disabled
+	if err := c.Validate(); err != nil {
+		t.Errorf("empty invite_ttl must be valid (never expire), got %v", err)
+	}
+	c = validConfig(t)
+	c.Auth.InviteTTL = "24h"
+	if err := c.Validate(); err != nil {
+		t.Errorf("invite_ttl=24h must be valid, got %v", err)
 	}
 }
 
