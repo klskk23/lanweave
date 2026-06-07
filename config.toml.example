@@ -62,3 +62,11 @@ jwt_ttl    = "2h"
 # the stored credential). Change it through the app once feature 002 lands.
 username = "admin"
 password = "CHANGE-ME-ON-FIRST-LOGIN"
+
+[limits]
+# Server-wide per-user caps. Each is three-state: omitted = default 10; an
+# explicit 0 = unlimited; a negative value fails startup. The admin user is
+# always exempt (unlimited). Existing users already over a cap keep their data
+# and are simply blocked from adding more until they drop back under the cap.
+# max_devices_per_user     = 10
+# max_owned_zones_per_user = 10
