@@ -1,9 +1,18 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: (uninitialized template) → 1.0.0
+Version change: 1.0.0 → 1.0.1 (current amendment);
+               (uninitialized template) → 1.0.0 (initial ratification)
 Bump rationale: First ratification of project constitution. No prior version
 exists; placeholders replaced with concrete principles.
+
+1.0.1 (2026-06-07): PATCH. Clarified the Security & Operational Discipline
+"Crypto choices" clause — the argon2id MUST governs low-entropy *password*
+hashing; high-entropy random tokens (e.g. session refresh tokens generated
+from crypto/rand) MAY be stored as a SHA-256 digest. This is a scoping
+clarification of the original OWASP-derived intent (OWASP argon2id guidance
+targets passwords), not a new or removed requirement. Surfaced by the slice
+024 /speckit-analyze pass (finding C1).
 
 Modified principles: (none — initial)
 Added principles:
@@ -179,8 +188,14 @@ feature's own spec.
   validated input.
 - **Crypto choices**: No new primitives. Use the Go standard library or
   vetted community packages (`golang.org/x/crypto`, `wireguard.com/wgctrl`,
-  etc.). Hashing MUST be argon2id with parameters meeting current OWASP
-  guidance.
+  etc.). **Password hashing** — any low-entropy, human-chosen secret such as
+  `users.password_hash` — MUST be argon2id with parameters meeting current
+  OWASP guidance. **High-entropy random tokens** (≥ 128 bits drawn from
+  `crypto/rand`, e.g. session refresh tokens) MAY instead be stored as a
+  SHA-256 digest: there is no low-entropy secret to brute-force, so a fast
+  deterministic hash is the correct choice and preserves O(1) indexed lookup.
+  argon2id remains mandatory wherever the hashed input is a password or other
+  low-entropy secret.
 - **Accepted risks register**: `DESIGN.md §11` is the only place project-wide
   security risks may be accepted. Anything not listed there requires either
   a fix or a `DESIGN.md` amendment (with version bump on this constitution
@@ -252,4 +267,4 @@ Tracking entry on the next plan.
 constitutional principles for context but MUST NOT contradict them; in
 case of conflict, this file wins.
 
-**Version**: 1.0.0 | **Ratified**: 2026-06-05 | **Last Amended**: 2026-06-05
+**Version**: 1.0.1 | **Ratified**: 2026-06-05 | **Last Amended**: 2026-06-07
