@@ -129,6 +129,170 @@ password = "supersecret"
 	}
 }
 
+// writeTLSToggleConfig writes a minimal valid config, inserting tlsLine verbatim
+// into [server] (pass "" to omit the tls key entirely). Returns the config path.
+func writeTLSToggleConfig(t *testing.T, tlsLine string) string {
+	t.Helper()
+	dir := t.TempDir()
+	cert, key, err := testutil.WriteSelfSignedCert(dir)
+	if err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	toml := `
+[server]
+listen = "127.0.0.1:8443"
+` + tlsLine + `
+tls_cert = "` + cert + `"
+tls_key = "` + key + `"
+data_dir = "` + dir + `"
+
+[wireguard]
+network = "100.127.0.0/16"
+endpoint = "vpn.example.com:51820"
+
+[auth]
+jwt_secret = "0123456789abcdef0123456789abcdef"
+
+[admin]
+username = "admin"
+password = "supersecret"
+`
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(toml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestTLSEnabledThreeState proves the tls toggle distinguishes "unset" (HTTPS,
+// safe default) from explicit false (plaintext) — the FR-002 no-downgrade
+// invariant. A bare bool would collapse unset and false; *bool keeps them apart.
+func TestTLSEnabledThreeState(t *testing.T) {
+	decoded := []struct {
+		name    string
+		tlsLine string
+		want    bool
+	}{
+		{"unset key defaults to HTTPS", "", true},
+		{"explicit true", "tls = true", true},
+		{"explicit false is plaintext", "tls = false", false},
+	}
+	for _, tc := range decoded {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := config.Load(writeTLSToggleConfig(t, tc.tlsLine))
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if got := c.Server.TLSEnabled(); got != tc.want {
+				t.Errorf("TLSEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// Direct struct three-state (nil pointer must read as HTTPS, never panic).
+	tru, fls := true, false
+	for _, tc := range []struct {
+		name string
+		ptr  *bool
+		want bool
+	}{
+		{"nil pointer is HTTPS", nil, true},
+		{"&true", &tru, true},
+		{"&false", &fls, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := config.ServerConfig{TLS: tc.ptr}
+			if got := s.TLSEnabled(); got != tc.want {
+				t.Errorf("TLSEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidateTLSConditional proves cert/key validation is gated on the
+// transport mode: TLS (default/explicit true) still hard-fails on an unreadable
+// cert (FR-004, no silent downgrade); plaintext ignores cert/key entirely
+// (FR-005).
+func TestValidateTLSConditional(t *testing.T) {
+	tru, fls := true, false
+
+	// Plaintext mode ignores cert/key — even a bogus path must validate clean.
+	t.Run("plaintext ignores bad cert path", func(t *testing.T) {
+		c := validConfig(t)
+		c.Server.TLS = &fls
+		c.Server.TLSCert = "/no/such/cert.pem"
+		c.Server.TLSKey = "/no/such/key.pem"
+		if err := c.Validate(); err != nil {
+			t.Fatalf("plaintext mode should ignore cert/key, got: %v", err)
+		}
+	})
+	t.Run("plaintext ignores empty cert path", func(t *testing.T) {
+		c := validConfig(t)
+		c.Server.TLS = &fls
+		c.Server.TLSCert = ""
+		c.Server.TLSKey = ""
+		if err := c.Validate(); err != nil {
+			t.Fatalf("plaintext mode should ignore empty cert/key, got: %v", err)
+		}
+	})
+
+	// TLS mode (nil = default, and explicit true) hard-fails on a missing cert.
+	for _, tc := range []struct {
+		name string
+		tls  *bool
+	}{
+		{"default (nil) requires cert", nil},
+		{"explicit true requires cert", &tru},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validConfig(t)
+			c.Server.TLS = tc.tls
+			c.Server.TLSCert = "/no/such/cert.pem"
+			err := c.Validate()
+			if err == nil {
+				t.Fatal("TLS mode with missing cert must fail validation")
+			}
+			if !strings.Contains(err.Error(), "server.tls_cert") {
+				t.Fatalf("error %q does not mention server.tls_cert", err.Error())
+			}
+		})
+	}
+}
+
+// TestWarnPlaintextExposure covers the plaintext-on-non-loopback warning
+// decision (FR-006/FR-007): warn only when plaintext AND the bind host is not
+// loopback. TLS mode never warns regardless of address.
+func TestWarnPlaintextExposure(t *testing.T) {
+	const plaintext, httpsOn = false, true
+
+	cases := []struct {
+		name   string
+		tlsOn  bool
+		listen string
+		want   bool
+	}{
+		{"plaintext loopback v4", plaintext, "127.0.0.1:8080", false},
+		{"plaintext loopback v6", plaintext, "[::1]:8080", false},
+		{"plaintext localhost", plaintext, "localhost:8080", false},
+		{"plaintext all-interfaces v4", plaintext, "0.0.0.0:8080", true},
+		{"plaintext all-interfaces v6", plaintext, "[::]:8080", true},
+		{"plaintext empty host", plaintext, ":8080", true},
+		{"plaintext real ip", plaintext, "192.168.1.10:8080", true},
+		{"plaintext hostname", plaintext, "vpn.example.com:8080", true},
+		{"tls non-loopback never warns", httpsOn, "0.0.0.0:8080", false},
+		{"tls loopback never warns", httpsOn, "127.0.0.1:8080", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			on := tc.tlsOn
+			s := config.ServerConfig{Listen: tc.listen, TLS: &on}
+			if got := s.WarnPlaintextExposure(); got != tc.want {
+				t.Errorf("WarnPlaintextExposure(listen=%q, tls=%v) = %v, want %v", tc.listen, tc.tlsOn, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSecretRedaction proves secrets never appear in structured logs (FR-019).
 func TestSecretRedaction(t *testing.T) {
 	var buf bytes.Buffer

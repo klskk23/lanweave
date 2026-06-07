@@ -4,9 +4,17 @@
 # plaintext. Restrict it (`chmod 600`, root-owned) and never commit it to git.
 
 [server]
-# HTTPS bind address (host:port). HTTPS only; there is no plaintext listener.
+# Bind address (host:port). HTTPS by default. Set tls = false ONLY behind a
+# TLS-terminating reverse proxy (nginx/Caddy) that serves clients over HTTPS;
+# bind plaintext to loopback (e.g. 127.0.0.1) — a non-loopback plaintext bind
+# logs a startup warning. Never expose a plaintext listener to the public.
 listen   = "0.0.0.0:8443"
-# PEM certificate and private key. Operator-supplied (self-signed or Let's Encrypt).
+# Transport mode. Omitted or true = HTTPS (cert/key required, missing cert is a
+# hard failure — never silently downgraded). false = plaintext HTTP (cert/key
+# ignored). Existing configs that never set this stay HTTPS.
+# tls    = true
+# PEM certificate and private key. Operator-supplied (self-signed or Let's
+# Encrypt). Required in HTTPS mode; ignored when tls = false.
 tls_cert = "/etc/lanweave/cert.pem"
 tls_key  = "/etc/lanweave/key.pem"
 # Directory for the SQLite database (db.sqlite) and the server WireGuard key.

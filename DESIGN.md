@@ -50,7 +50,7 @@ zone 在服务端落地为 nftables set，是 forward 链上的允许规则。
   └─────────┘            └─────────┘            └─────────┘
 ```
 
-- **控制面**：HTTPS REST + JSON，客户端持 JWT 调 API。
+- **控制面**：HTTPS REST + JSON（或经 TLS 终止反代后的明文 HTTP，见 §11），客户端持 JWT 调 API。
 - **数据面**：WireGuard，所有 peer 只与服务器建链，peer 间流量经服务器 forward。
 - **隔离面**：nftables 专用 table，按 zone 维护 set，控制 peer 互访。
 
@@ -218,7 +218,7 @@ table inet lanweave {
 
 ## 8. REST API（草案）
 
-> 全部 HTTPS。Content-Type: application/json。鉴权头：`Authorization: Bearer <jwt>`。
+> HTTPS（或 TLS 终止反代后的明文 HTTP，见 §11）。Content-Type: application/json。鉴权头：`Authorization: Bearer <jwt>`。
 
 ### 8.1 公开端点
 | 方法 | 路径               | 说明                                    |
@@ -373,6 +373,7 @@ password = "ChangeMeOnFirstLogin!"  # 明文，首次启动后建议改并重启
 | 跳过证书验证（`--insecure` CLI flag） | 仅 troubleshooting，完全不验证、常驻「未验证」警示；UI 不暴露此开关 |
 | TOFU 信任自签 / 内网证书（feature 018 取代 017 会话级 opt-in） | 首次连接证书过不了系统 CA 时弹窗、显式信任、按 server 持久化叶证书 SHA-256 指纹；验证=指纹或系统 CA；证书变更弹更重警告并阻断、需显式接受；中性「已信任」指示 |
 | 客户端主机防火墙入站放行（feature 018，默认关、Windows-only） | 用户显式勾选且隧道已连接才装具名规则 `lanweave-vpn-inbound`（仅 `remoteip=100.127.0.0/16`、`profile=any`）；开启即让同网段 peer 触达本机所有本地服务，旁附常驻内联警告（无二次确认）；断开 / 取消 / 登出 / 退出即删，启动清扫孤儿规则 |
+| 服务端明文 HTTP 监听（`tls=false`，feature 021） | 仅显式 `tls=false` 才明文；缺省/`tls=true` 仍 HTTPS 且缺证书硬失败（绝不静默降级）；明文绑定非回环地址启动告警；须置于 TLS 终止反代之后、勿暴露明文监听公网；客户端仍连反代 `https://`、数据面 WireGuard 不变 |
 | 服务进程 root 运行                       | systemd 用 CapabilityBoundingSet 缩小      |
 | 发布产物未签名（Windows installer / .deb） | 发布说明提示 SmartScreen「更多信息→仍要运行」；附 `SHA256SUMS` 供完整性校验 |
 | 桌面 GUI（Fyne 弹窗 / 指示器 / 开关）与主机 `netsh` 防火墙调用以人工 quickstart 矩阵验收，非自动化端到端测试 | 安全相关逻辑（登出序列、证书失败→TOFU 钉扎/比对、`CertError`/`ErrCertChanged` 路径、防火墙开关决策真值表 controller 层 T015 自动覆盖）仍有 apiclient / controller 层自动化验收；仅纯 GUI 呈现与 `netsh` 执行效果（含 018 的 TOFU 首次信任/变更弹窗，及防火墙规则实际装/删 + peer 反向触达本机）走人工（宪法 II 的 GUI/exec 豁免，017 登记，018 延伸；US2 端到端为实机 + 实 peer 的固有结果，无法在 `unshare` 网关内复现，落到 Windows 人工矩阵——接受发现 C1） |

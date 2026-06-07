@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,10 +59,17 @@ func cleanupDataPlane(iface, table string) {
 }
 
 func writeConfig(t *testing.T, dataDir, adminPassword, certPath, keyPath, iface, table string) string {
+	return writeServerConfig(t, dataDir, adminPassword, certPath, keyPath, iface, table, "127.0.0.1:0", "")
+}
+
+// writeServerConfig is writeConfig with an explicit listen address and an extra
+// [server] line (e.g. "tls = false"); pass "" for tlsLine to omit it.
+func writeServerConfig(t *testing.T, dataDir, adminPassword, certPath, keyPath, iface, table, listen, tlsLine string) string {
 	t.Helper()
 	body := fmt.Sprintf(`
 [server]
-listen = "127.0.0.1:0"
+listen = %q
+%s
 tls_cert = %q
 tls_key = %q
 data_dir = %q
@@ -85,7 +93,7 @@ jwt_secret = "0123456789abcdef0123456789abcdef"
 [admin]
 username = "admin"
 password = %q
-`, certPath, keyPath, dataDir, iface, table, adminPassword)
+`, listen, tlsLine, certPath, keyPath, dataDir, iface, table, adminPassword)
 	path := filepath.Join(dataDir, "config.toml")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -331,6 +339,176 @@ func bootAndStop(t *testing.T, configPath string) {
 	cancel()
 	if err := <-runErr; err != nil {
 		t.Fatalf("shutdown error: %v", err)
+	}
+}
+
+// TestRunServesPlaintextHTTP is the US1 acceptance test: with tls = false the
+// server listens plaintext HTTP and a bare (non-TLS) client completes an
+// authenticated, protected call. Certs are present in the config but ignored.
+func TestRunServesPlaintextHTTP(t *testing.T) {
+	testutil.RequireNetAdmin(t)
+	ensureLoopbackUp(t)
+	dir := t.TempDir()
+	cert, key := newCerts(t, dir)
+	iface, table := uniqueNames(t)
+	t.Cleanup(func() { cleanupDataPlane(iface, table) })
+	const adminPW = "supersecret-pw"
+	path := writeServerConfig(t, dir, adminPW, cert, key, iface, table, "127.0.0.1:0", "tls = false")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addrCh := make(chan string, 1)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- app.Run(ctx, app.Options{ConfigPath: path, Version: "acc", Ready: func(a string) { addrCh <- a }})
+	}()
+	var addr string
+	select {
+	case addr = <-addrCh:
+	case err := <-runErr:
+		t.Fatalf("server exited before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("server not ready within 5s")
+	}
+
+	// Plain HTTP client — no TLS at all.
+	client := &http.Client{}
+	base := "http://" + addr
+
+	var login protocol.LoginResponse
+	doJSON(t, client, http.MethodPost, base+"/api/v1/login", "",
+		protocol.LoginRequest{Username: "admin", Password: adminPW}, http.StatusOK, &login)
+
+	// A protected call must succeed over plaintext with the bearer token.
+	var list protocol.NodeListResponse
+	doJSON(t, client, http.MethodGet, base+"/api/v1/nodes", login.Token, nil, http.StatusOK, &list)
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned error on shutdown: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("graceful shutdown exceeded 10s")
+	}
+}
+
+// TestRunDefaultConfigIsHTTPS is the US2 acceptance test that a config which
+// never mentions the tls toggle still serves HTTPS (no silent downgrade): a TLS
+// client succeeds and a bare HTTP client against the same port does not get 200.
+func TestRunDefaultConfigIsHTTPS(t *testing.T) {
+	testutil.RequireNetAdmin(t)
+	ensureLoopbackUp(t)
+	dir := t.TempDir()
+	cert, key := newCerts(t, dir)
+	iface, table := uniqueNames(t)
+	t.Cleanup(func() { cleanupDataPlane(iface, table) })
+	path := writeConfig(t, dir, "supersecret", cert, key, iface, table) // no tls key
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addrCh := make(chan string, 1)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- app.Run(ctx, app.Options{ConfigPath: path, Version: "acc", Ready: func(a string) { addrCh <- a }})
+	}()
+	var addr string
+	select {
+	case addr = <-addrCh:
+	case err := <-runErr:
+		t.Fatalf("server exited before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("server not ready within 5s")
+	}
+
+	tlsClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test client
+	}}
+	resp, err := tlsClient.Get("https://" + addr + "/api/v1/healthz")
+	if err != nil {
+		t.Fatalf("https healthz: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("https healthz status = %d, want 200", resp.StatusCode)
+	}
+
+	// A bare HTTP request to the TLS port must not be served as 200 (proves the
+	// default really is HTTPS, not plaintext).
+	plain := &http.Client{Timeout: 3 * time.Second}
+	if r, err := plain.Get("http://" + addr + "/api/v1/healthz"); err == nil {
+		_ = r.Body.Close()
+		if r.StatusCode == http.StatusOK {
+			t.Fatalf("plain HTTP got 200 against a TLS listener; default downgraded to plaintext")
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned error on shutdown: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("graceful shutdown exceeded 10s")
+	}
+}
+
+// TestRunTLSMissingCertHardFails is the US2 acceptance test that TLS mode with
+// an unreadable cert aborts startup (never falls back to plaintext). It fails in
+// config validation, before any data-plane setup, so it needs no privilege.
+func TestRunTLSMissingCertHardFails(t *testing.T) {
+	dir := t.TempDir()
+	// tls = true with cert/key paths that do not exist.
+	path := writeServerConfig(t, dir, "supersecret",
+		filepath.Join(dir, "missing-cert.pem"), filepath.Join(dir, "missing-key.pem"),
+		"wgt-unused", "lw-unused", "127.0.0.1:0", "tls = true")
+
+	err := app.Run(context.Background(), app.Options{ConfigPath: path, Version: "x"})
+	if err == nil {
+		t.Fatal("expected startup error for TLS mode with missing cert")
+	}
+	if !strings.Contains(err.Error(), "tls_cert") {
+		t.Fatalf("error %q does not mention tls_cert", err.Error())
+	}
+}
+
+// TestRunPlaintextNonLoopbackStarts is the US3 acceptance test that a plaintext
+// listener on a non-loopback address (0.0.0.0) is warned about but NOT blocked:
+// the server still reaches Ready and serves.
+func TestRunPlaintextNonLoopbackStarts(t *testing.T) {
+	testutil.RequireNetAdmin(t)
+	ensureLoopbackUp(t)
+	dir := t.TempDir()
+	cert, key := newCerts(t, dir)
+	iface, table := uniqueNames(t)
+	t.Cleanup(func() { cleanupDataPlane(iface, table) })
+	path := writeServerConfig(t, dir, "supersecret", cert, key, iface, table, "0.0.0.0:0", "tls = false")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addrCh := make(chan string, 1)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- app.Run(ctx, app.Options{ConfigPath: path, Version: "acc", Ready: func(a string) { addrCh <- a }})
+	}()
+	select {
+	case <-addrCh: // reached Ready → non-loopback plaintext bind did not block
+	case err := <-runErr:
+		t.Fatalf("server exited before ready (non-loopback plaintext blocked startup?): %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("server not ready within 5s")
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned error on shutdown: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("graceful shutdown exceeded 10s")
 	}
 }
 

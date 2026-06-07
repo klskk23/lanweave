@@ -81,13 +81,19 @@ func Run(ctx context.Context, opts Options) error {
 	onlineTracker := status.New(wgServer.Handshakes, status.DefaultInterval, log)
 	go onlineTracker.Run(ctx)
 
-	cert, err := tls.LoadX509KeyPair(cfg.Server.TLSCert, cfg.Server.TLSKey)
-	if err != nil {
-		return fmt.Errorf("TLS certificate load failed: %w", err)
-	}
-	tlsConfig := &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{cert},
+	// In plaintext mode (tls = false, for a TLS-terminating reverse proxy) no
+	// certificate is loaded or required; tlsConfig stays nil. The safe default
+	// is HTTPS, so any config that did not explicitly opt out lands here.
+	var tlsConfig *tls.Config
+	if cfg.Server.TLSEnabled() {
+		cert, err := tls.LoadX509KeyPair(cfg.Server.TLSCert, cfg.Server.TLSKey)
+		if err != nil {
+			return fmt.Errorf("TLS certificate load failed: %w", err)
+		}
+		tlsConfig = &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{cert},
+		}
 	}
 
 	jwtTTL, err := time.ParseDuration(cfg.Auth.JWTTTL)
@@ -124,16 +130,23 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cfg.Server.Listen, err)
 	}
-	tlsLn := tls.NewListener(ln, tlsConfig)
-
-	log.Info("https listening", "addr", ln.Addr().String())
+	serveLn := ln
+	if cfg.Server.TLSEnabled() {
+		serveLn = tls.NewListener(ln, tlsConfig)
+		log.Info("https listening", "addr", ln.Addr().String())
+	} else {
+		if cfg.Server.WarnPlaintextExposure() {
+			log.Warn("plaintext HTTP on a non-loopback address; terminate TLS at a reverse proxy and do not expose this listener publicly", "addr", ln.Addr().String())
+		}
+		log.Info("http listening (plaintext)", "addr", ln.Addr().String())
+	}
 	if opts.Ready != nil {
 		opts.Ready(ln.Addr().String())
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		err := srv.Serve(tlsLn)
+		err := srv.Serve(serveLn)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return

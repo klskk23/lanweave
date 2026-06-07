@@ -44,10 +44,49 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen  string `toml:"listen"`
+	Listen string `toml:"listen"`
+	// TLS is a three-state pointer: nil (key absent) and true both mean HTTPS;
+	// only an explicit `tls = false` selects plaintext HTTP. The pointer keeps
+	// "unset" distinct from "explicit false" so an existing config that never
+	// mentioned the key is never silently downgraded to plaintext.
+	TLS     *bool  `toml:"tls"`
 	TLSCert string `toml:"tls_cert"`
 	TLSKey  string `toml:"tls_key"`
 	DataDir string `toml:"data_dir"`
+}
+
+// TLSEnabled reports whether the control plane listens over HTTPS. It is
+// nil-safe: an absent toggle reads as enabled, so the safe default holds even
+// on a path that skipped defaulting.
+func (s ServerConfig) TLSEnabled() bool { return s.TLS == nil || *s.TLS }
+
+// WarnPlaintextExposure reports whether a startup warning is warranted: the
+// control plane is plaintext AND bound to a non-loopback address (so it could
+// be reachable beyond the local reverse proxy). It does not block startup.
+func (s ServerConfig) WarnPlaintextExposure() bool {
+	return !s.TLSEnabled() && !s.listenIsLoopback()
+}
+
+// listenIsLoopback reports whether the listen host is a loopback address. An
+// empty host (all interfaces), a bare hostname, or an unparseable value is
+// conservatively treated as non-loopback so the exposure warning errs toward
+// firing.
+func (s ServerConfig) listenIsLoopback() bool {
+	host, _, err := net.SplitHostPort(s.Listen)
+	if err != nil {
+		return false
+	}
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 type LogConfig struct {
@@ -146,11 +185,17 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("server.listen %q is not host:port: %w", c.Server.Listen, err))
 	}
 
-	certOK := requireReadable(&errs, "server.tls_cert", c.Server.TLSCert)
-	keyOK := requireReadable(&errs, "server.tls_key", c.Server.TLSKey)
-	if certOK && keyOK {
-		if _, err := tls.LoadX509KeyPair(c.Server.TLSCert, c.Server.TLSKey); err != nil {
-			errs = append(errs, fmt.Errorf("server tls cert/key invalid: %w", err))
+	// Plaintext mode (tls = false, behind a TLS-terminating reverse proxy) needs
+	// no certificate, so cert/key are ignored. TLS mode still hard-fails on a
+	// missing or invalid cert: an absent toggle defaults to TLS, so existing
+	// configs are never silently downgraded.
+	if c.Server.TLSEnabled() {
+		certOK := requireReadable(&errs, "server.tls_cert", c.Server.TLSCert)
+		keyOK := requireReadable(&errs, "server.tls_key", c.Server.TLSKey)
+		if certOK && keyOK {
+			if _, err := tls.LoadX509KeyPair(c.Server.TLSCert, c.Server.TLSKey); err != nil {
+				errs = append(errs, fmt.Errorf("server tls cert/key invalid: %w", err))
+			}
 		}
 	}
 
