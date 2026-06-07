@@ -35,6 +35,11 @@ var (
 	ErrDeviceLimitReached = errors.New("device limit reached")
 	ErrServer             = errors.New("server error")
 
+	// ErrRefreshFailed reports that a silent token refresh did not succeed (the
+	// refresh token was rejected or the server was unreachable), so the caller must
+	// fall back to password sign-in.
+	ErrRefreshFailed = errors.New("refresh failed")
+
 	// Zone/session errors (feature 011).
 	ErrSessionExpired        = errors.New("session expired")
 	ErrZoneNameTaken         = errors.New("zone name already taken")
@@ -95,12 +100,13 @@ func certFingerprint(cert *x509.Certificate) string {
 
 // Client talks to one lanweave server.
 type Client struct {
-	baseURL    string
-	http       *http.Client
-	token      string
-	insecure   bool
-	rootCAs    *x509.CertPool
-	pinnedCert string
+	baseURL      string
+	http         *http.Client
+	token        string
+	refreshToken string
+	insecure     bool
+	rootCAs      *x509.CertPool
+	pinnedCert   string
 }
 
 // New builds a Client for the given base URL (e.g. "https://vpn.example.com").
@@ -163,14 +169,41 @@ func (c *Client) Register(invite, username, password string) error {
 	return err
 }
 
-// Login authenticates and stores the session token on the client.
+// Login authenticates and stores the session token and refresh token on the client.
 func (c *Client) Login(username, password string) error {
 	var resp protocol.LoginResponse
 	if _, err := c.do(http.MethodPost, "/api/v1/login", false, protocol.LoginRequest{Username: username, Password: password}, &resp); err != nil {
 		return err
 	}
 	c.token = resp.Token
+	c.refreshToken = resp.RefreshToken
 	return nil
+}
+
+// Refresh exchanges the held refresh token for a fresh access token, storing it on
+// the client. It returns ErrRefreshFailed if no refresh token is held or the server
+// rejects it — the caller then falls back to password sign-in.
+func (c *Client) Refresh() error {
+	if c.refreshToken == "" {
+		return ErrRefreshFailed
+	}
+	var resp protocol.RefreshResponse
+	if _, err := c.do(http.MethodPost, "/api/v1/refresh", false, protocol.RefreshRequest{RefreshToken: c.refreshToken}, &resp); err != nil {
+		return fmt.Errorf("%w: %v", ErrRefreshFailed, err)
+	}
+	c.token = resp.Token
+	return nil
+}
+
+// Logout revokes the held refresh token server-side. It is best-effort: with no
+// refresh token there is nothing to revoke, and network/server errors are returned
+// so the caller can decide, but local sign-out should proceed regardless.
+func (c *Client) Logout() error {
+	if c.refreshToken == "" {
+		return nil
+	}
+	_, err := c.do(http.MethodPost, "/api/v1/logout", false, protocol.LogoutRequest{RefreshToken: c.refreshToken}, nil)
+	return err
 }
 
 // RegisterNode registers this device's public key under a name and returns the node.
@@ -197,6 +230,12 @@ func (c *Client) ServerInfo() (protocol.ServerInfoResponse, error) {
 
 // SetToken sets the bearer token (e.g. a session restored from the secure store).
 func (c *Client) SetToken(token string) { c.token = token }
+
+// SetRefreshToken sets the refresh token (e.g. restored from the secure store on launch).
+func (c *Client) SetRefreshToken(rt string) { c.refreshToken = rt }
+
+// RefreshToken returns the currently held refresh token (cached after Login/SetRefreshToken).
+func (c *Client) RefreshToken() string { return c.refreshToken }
 
 // Me returns the signed-in user; used to validate a cached session.
 func (c *Client) Me() (protocol.MeResponse, error) {
@@ -271,21 +310,42 @@ func (c *Client) DeleteNode(nodeID int64) error {
 func (c *Client) Insecure() bool { return c.insecure }
 
 // do performs a request, decoding into out (when non-nil) and mapping failures to typed
-// errors based on the HTTP status and the error envelope's code.
+// errors based on the HTTP status and the error envelope's code. On an authenticated
+// call that returns 401 (ErrSessionExpired) while a refresh token is held, it silently
+// refreshes the access token once and retries the original request exactly once — the
+// single chokepoint every authenticated call flows through, so lazy refresh is inherited
+// everywhere without per-call changes.
 func (c *Client) do(method, path string, auth bool, body, out any) (int, error) {
-	var reader io.Reader
+	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return 0, fmt.Errorf("encode request: %w", err)
 		}
-		reader = bytes.NewReader(b)
+		bodyBytes = b
+	}
+
+	status, err := c.attempt(method, path, auth, bodyBytes, out)
+	if auth && errors.Is(err, ErrSessionExpired) && c.refreshToken != "" {
+		if rerr := c.Refresh(); rerr != nil {
+			return status, err // refresh failed → surface the original session-expired error
+		}
+		return c.attempt(method, path, auth, bodyBytes, out)
+	}
+	return status, err
+}
+
+// attempt performs a single request without any refresh/retry logic.
+func (c *Client) attempt(method, path string, auth bool, bodyBytes []byte, out any) (int, error) {
+	var reader io.Reader
+	if bodyBytes != nil {
+		reader = bytes.NewReader(bodyBytes)
 	}
 	req, err := http.NewRequest(method, c.baseURL+path, reader)
 	if err != nil {
 		return 0, fmt.Errorf("build request: %w", err)
 	}
-	if body != nil {
+	if bodyBytes != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if auth {

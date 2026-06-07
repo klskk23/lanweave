@@ -292,6 +292,109 @@ func TestInsecureGetter(t *testing.T) {
 	}
 }
 
+// TestLazyRefreshOn401 covers US1: an authenticated call that gets 401 triggers exactly
+// one silent POST /refresh, then the original request is retried once and succeeds.
+func TestLazyRefreshOn401(t *testing.T) {
+	var refreshCalls, meCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/me", func(w http.ResponseWriter, r *http.Request) {
+		meCalls++
+		if r.Header.Get("Authorization") != "Bearer new-tok" {
+			protocol.WriteJSONError(w, http.StatusUnauthorized, "unauthorized", "expired")
+			return
+		}
+		_ = json.NewEncoder(w).Encode(protocol.MeResponse{UserID: 1, Username: "alice"})
+	})
+	mux.HandleFunc("POST /api/v1/refresh", func(w http.ResponseWriter, r *http.Request) {
+		refreshCalls++
+		var req protocol.RefreshRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.RefreshToken != "good-rt" {
+			protocol.WriteJSONError(w, http.StatusUnauthorized, "unauthorized", "bad rt")
+			return
+		}
+		_ = json.NewEncoder(w).Encode(protocol.RefreshResponse{Token: "new-tok"})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := apiclient.New(srv.URL)
+	c.SetToken("stale-tok")
+	c.SetRefreshToken("good-rt")
+
+	me, err := c.Me()
+	if err != nil {
+		t.Fatalf("Me with silent refresh: %v", err)
+	}
+	if me.Username != "alice" {
+		t.Errorf("me = %+v, want alice", me)
+	}
+	if refreshCalls != 1 {
+		t.Errorf("refresh called %d times, want exactly 1", refreshCalls)
+	}
+	if meCalls != 2 {
+		t.Errorf("me called %d times, want 2 (initial 401 + retry)", meCalls)
+	}
+	if c.Token() != "new-tok" {
+		t.Errorf("client token = %q, want new-tok (rewritten after refresh)", c.Token())
+	}
+}
+
+// TestLazyRefreshFailsSurfacesExpired covers US1: when /refresh itself fails, the call
+// surfaces ErrSessionExpired and does not loop.
+func TestLazyRefreshFailsSurfacesExpired(t *testing.T) {
+	var refreshCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		protocol.WriteJSONError(w, http.StatusUnauthorized, "unauthorized", "expired")
+	})
+	mux.HandleFunc("POST /api/v1/refresh", func(w http.ResponseWriter, _ *http.Request) {
+		refreshCalls++
+		protocol.WriteJSONError(w, http.StatusUnauthorized, "unauthorized", "rt expired")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := apiclient.New(srv.URL)
+	c.SetToken("stale-tok")
+	c.SetRefreshToken("bad-rt")
+
+	if _, err := c.Me(); !errors.Is(err, apiclient.ErrSessionExpired) {
+		t.Errorf("refresh-fails path: got %v, want ErrSessionExpired", err)
+	}
+	if refreshCalls != 1 {
+		t.Errorf("refresh called %d times, want exactly 1 (no loop)", refreshCalls)
+	}
+}
+
+// TestLogoutPostsRefreshToken covers US2: Logout POSTs the held refresh token to /logout.
+func TestLogoutPostsRefreshToken(t *testing.T) {
+	var gotRT string
+	var gotMethod, gotPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/logout", func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		var req protocol.LogoutRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotRT = req.RefreshToken
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := apiclient.New(srv.URL)
+	c.SetRefreshToken("rt-to-revoke")
+	if err := c.Logout(); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/api/v1/logout" {
+		t.Errorf("request = %s %s, want POST /api/v1/logout", gotMethod, gotPath)
+	}
+	if gotRT != "rt-to-revoke" {
+		t.Errorf("posted refresh token = %q, want rt-to-revoke", gotRT)
+	}
+}
+
 // TestDeleteNode covers logout's server call: a 204 returns nil and the wire request is a
 // DELETE to /api/v1/nodes/{id} with the bearer token; a non-2xx maps to a non-nil error.
 func TestDeleteNode(t *testing.T) {

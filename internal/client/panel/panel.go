@@ -20,6 +20,8 @@ type api interface {
 	Login(username, password string) error
 	Token() string
 	SetToken(token string)
+	RefreshToken() string
+	SetRefreshToken(token string)
 	Me() (protocol.MeResponse, error)
 	ListNodes() (protocol.NodeListResponse, error)
 	ListZones() (protocol.ZoneListResponse, error)
@@ -31,6 +33,7 @@ type api interface {
 	DeleteZone(name string) error
 	KickMember(name string, nodeID int64) error
 	DeleteNode(nodeID int64) error
+	Logout() error
 }
 
 var _ api = (*apiclient.Client)(nil)
@@ -92,6 +95,11 @@ func (c *Controller) LoadSession() (needSignIn bool, err error) {
 		return true, nil
 	}
 	c.api.SetToken(string(tok))
+	// Restore the refresh token too, so an expired access token is silently renewed
+	// (apiclient.do) during this session instead of forcing a sign-in.
+	if rt, rerr := c.keys.Get(keyring.RefreshTokenName); rerr == nil && len(rt) > 0 {
+		c.api.SetRefreshToken(string(rt))
+	}
 	if _, merr := c.api.Me(); merr != nil {
 		if errors.Is(merr, apiclient.ErrSessionExpired) || errors.Is(merr, apiclient.ErrAuthFailed) {
 			return true, nil
@@ -101,12 +109,16 @@ func (c *Controller) LoadSession() (needSignIn bool, err error) {
 	return false, nil
 }
 
-// SignIn authenticates and caches the new session token in the secure store.
+// SignIn authenticates and caches the new session token and refresh token in the
+// secure store, so a later launch can restore the session and silently renew it.
 func (c *Controller) SignIn(username, password string) error {
 	if err := c.api.Login(username, password); err != nil {
 		return err
 	}
-	return c.keys.Set(keyring.SessionTokenName, []byte(c.api.Token()))
+	if err := c.keys.Set(keyring.SessionTokenName, []byte(c.api.Token())); err != nil {
+		return err
+	}
+	return c.keys.Set(keyring.RefreshTokenName, []byte(c.api.RefreshToken()))
 }
 
 // Devices lists the user's devices, marking exactly the one matching the setup record as
@@ -202,10 +214,14 @@ func (c *Controller) DeleteZone(name string) error {
 // absent); err is non-nil only when a local clear failed.
 func (c *Controller) Logout() (remoteRemoved bool, err error) {
 	remoteRemoved = c.removeRemoteNode()
+	// Revoke the refresh token server-side so a cached RT can never silently renew after
+	// logout. Best-effort: a network failure must not block the local sign-out below.
+	_ = c.api.Logout()
 	// Close the host rule before clearing state so logout never strands an open firewall.
 	_ = c.fw.Clear()
 	localErr := errors.Join(
 		c.keys.Delete(keyring.SessionTokenName),
+		c.keys.Delete(keyring.RefreshTokenName),
 		c.keys.Delete(keyring.DeviceKeyName),
 		state.Clear(c.statePath),
 	)
@@ -235,6 +251,9 @@ func (c *Controller) removeRemoteNode() bool {
 func (c *Controller) UseClient(a api) {
 	if tok, gerr := c.keys.Get(keyring.SessionTokenName); gerr == nil && len(tok) > 0 {
 		a.SetToken(string(tok))
+	}
+	if rt, gerr := c.keys.Get(keyring.RefreshTokenName); gerr == nil && len(rt) > 0 {
+		a.SetRefreshToken(string(rt))
 	}
 	c.api = a
 }

@@ -1,6 +1,6 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化），021 为服务端可选明文 HTTP 监听（供反向代理终止 TLS），022 为客户端主页面与 Wizard 视觉改版（按 `UI-DESIGN.md`/`UI-example.png`，Material 3 启发的深色 flat 风格）；023 为每用户设备 / 拥有-zone 配额上限（配置文件全局值，默认各 10，0=无限制，admin 豁免）。
+> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化），021 为服务端可选明文 HTTP 监听（供反向代理终止 TLS），022 为客户端主页面与 Wizard 视觉改版（按 `UI-DESIGN.md`/`UI-example.png`，Material 3 启发的深色 flat 风格）；023 为每用户设备 / 拥有-zone 配额上限（配置文件全局值，默认各 10，0=无限制，admin 豁免）；024 为会话 refresh token（登录发 access+refresh，access 2h 过期客户端用 refresh token 静默换新，不再每 2h 重输密码；RT 30天滑动、服务端存哈希可吊销）；025 为退出登录加固（服务器网络不可达时阻止退出以避免残留孤儿 node，含「强制退出」逃生口，登出吊销本设备 refresh token）。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -34,6 +34,8 @@
 | 021 | server-http-mode ✅                      | 服务端     | 001        | 服务端可配 tls=false 监听明文 HTTP(供反代终止 TLS);默认仍 HTTPS,缺 cert 仍硬失败,现存配置不降级 |
 | 022 | client-ui-redesign                      | 客户端     | 010, 011, 020 | 主页面+Wizard 按 UI-DESIGN.md/UI-example.png 重做(Material 3 深色 flat):自定义主题/App Bar+overflow/Hero 卡片/列表 avatar+状态点/Switch/区域详情页/流量计数;Wizard 仅套主题,客户端行为零回归 |
 | 023 | per-user-limits ✅                       | 服务端/客户端 | 002, 004, 005, 020 | 每用户设备数 + 拥有-zone 数配额(配置全局值,默认各 10,0=无限,admin 豁免);超限 409,删除释放名额,下调上限只挡新增 |
+| 024 | session-refresh-tokens                   | 服务端/客户端 | 002, 009, 019 | 登录返回 access + refresh token;access 2h 过期时客户端用 refresh token 静默换新,不再每 2h 弹密码;RT 30天滑动、服务端存哈希可逐条吊销 |
+| 025 | client-logout-hardening                  | 客户端     | 017, 024   | 退出登录时服务器 API 网络不可达(3 次 1s 重试仍失败)则阻止退出 + 弹窗(取消 / 强制退出逃生口),避免残留孤儿 node;登出额外吊销本设备 RT |
 
 ---
 
@@ -537,6 +539,81 @@
 
 **依赖 / 关联**
 - 004（node 注册强制点）、005（zone 创建 / owner 计数）、002（JWT `IsAdmin` claim 供豁免）、020（i18n 新文案走双语）。
+
+---
+
+### 024 — session-refresh-tokens
+**背景**
+- access JWT 默认 2h 过期（`jwt_ttl="2h"`），服务端无 refresh 端点，登录是拿 token 的唯一途径。客户端 `LoadSession→Me()` 一旦发现过期即 `promptSignIn`，用户每用约 2h 就被要求重输密码一次，体验差。
+- grill 阶段权衡过三条路：在本地 keyring 存密码自动重登（账号级凭据爆炸半径大、偏离 §7.3，否）；只调长 `jwt_ttl`（削弱吊销窗口、治标，否）；**服务端 refresh-token**（选）——access token 仍短期无状态，另发可吊销的长期 refresh token，客户端静默换新 access token。
+
+**范围（服务端）**
+- 新表 `refresh_tokens`：`id, user_id（FK ON DELETE CASCADE）, token_hash, expires_at, revoked_at（可空）, created_at`，`token_hash` 唯一索引。
+- RT 形态：`crypto/rand` 32 字节 → base64url **不透明随机串**；服务端只存 **SHA-256 哈希**（明文 RT 仅在签发响应里给客户端一次，不落库）。
+- store 层：`Issue(userID)` 生成明文 RT + 落哈希，`expires_at = now+30d`；`Validate(rt)` 按哈希查、校验未吊销且未过期 → 返回 userID；刷新成功**滑动**顺延 30d；`Revoke(rt)` 置 `revoked_at`（幂等）；删用户经 FK 级联清其全部 RT。
+- `/api/v1/login` 响应由 `{token}` 改为 `{token, refresh_token}`（access token TTL 仍 **2h** 不变）。
+- 新增 `POST /api/v1/refresh`：body `{refresh_token}`，**不经 access-JWT 中间件**（靠 RT 本身鉴权）→ `{token}` 新 access token 并滑动有效期；RT 无效 / 过期 / 吊销 → 401。
+- 新增 `POST /api/v1/logout`：body `{refresh_token}` → 204 **幂等吊销**（未知 / 已吊销也回 204）；供 025 登出调用。
+- `register` **不变**（仍只回账号信息，客户端注册后照常 `/login` 取 RT）。
+
+**范围（客户端）**
+- keyring 新增 `RefreshTokenName`；登录（及注册后登录）、`onboard.Provision` 全流程成功后同存 access token + RT（对齐 019 的落盘点）。
+- **惰性刷新**：认证 API 调用遇 401（`ErrSessionExpired`）→ 静默 `POST /refresh` 用存的 RT 换新 access token、回写 keyring、原调用重试一次；`/refresh` 也失败（RT 过期 / 吊销）→ 清会话回落 `promptSignIn`（密码）。**不设主动定时器**。
+- `Cleanup` / logout 清理追加删 `RefreshTokenName`。
+
+**DESIGN.md 修订（宪法强制，同 PR）**
+- §7.3：access JWT 仍无状态短期（2h）+ 新增**有状态**的 refresh token（30天滑动、服务端存哈希、可逐条吊销）。
+- §8 API 表：`/login` 响应加 `refresh_token`；新增 `POST /refresh`、`POST /logout`；§4 数据表加 `refresh_tokens`。
+- §11 风险登记：重启换 `jwt_secret` 仅废 access token，RT 经 DB 查验仍有效——「重启=全员吊销」不再成立，全员吊销需删用户或清 `refresh_tokens` 表；本地 keyring 多存一个长期 RT（DPAPI 保护）作为接受项。
+
+**验收**
+- 登录响应含 `refresh_token`；access token 过期后客户端**不再弹密码框**，自动用 RT 换新继续；RT 被吊销 / 过期后才回落到密码登录。
+- 服务端集成测试（真 SQLite，`unshare -rUn`，宪法 II 不 mock）：`/login` 发 RT；`/refresh` 对有效 RT 发新 token 且滑动 `expires_at`，对过期 / 已吊销 / 未知 RT 返 401；`/logout` 幂等吊销；删用户级联清 RT。
+- 客户端 headless 测（`panel` / `apiclient` + fake 边界）：401 → 静默刷新 → 原调用重试成功；刷新失败 → 触发重新登录路径。
+
+**不做**
+- RT 轮换（一次一换）/ 重放检测（本期 RT 可重复用至过期 / 吊销）。
+- 主动定时刷新（仅惰性按需）。
+- 改密码即吊销 RT（当前无自助改密端点，无从触发）。
+- admin「全部登出 / 强制全员重登」端点（删用户已够，留后续）。
+- `register` 直接发会话（仍走注册后 `/login`）。
+
+**依赖 / 关联**
+- 002（`/login`、JWT、鉴权中间件）、009（客户端 keyring + REST client）、019（会话 token 落盘点，RT 同处落盘）。
+
+---
+
+### 025 — client-logout-hardening
+**背景**
+- 017 的退出登录是「best-effort 远端 + **总是**清本地」：无论服务器可达与否都清掉本地 token / key / state，只在远端可能残留时弹一句「节点可能仍注册」警告。结果——服务器**网络不可达**时退登会在服务端留下无人可清的孤儿 node。
+- 需求：服务器 API 连不上（重试 3 次仍失败）时**阻止退出**并弹窗，避免残留；但保留一个「强制退出」逃生口，防止服务器永久失联时用户被困死。依赖 024 的 refresh-token 吊销端点，使登出不留会话残留。
+
+**范围**
+- **流程重排**：确认框确认后，**先尝试远端删除（隧道仍连着）→ 确认删除后才拆隧道 / 清防火墙 / 清本地**（API 是公网 HTTPS，与隧道通断无关，连着也能删）。`removeRemoteNode`（列设备 + 删 node）为一次尝试，**最多 3 次、固定 1s 间隔**，期间转无限进度条。
+- **按结果分支**：
+  - 确认删除（204）/ 已不在（404 或不在节点列表）→ 断隧道 → 清防火墙 → 调 `POST /logout` 吊销本设备 RT → 清 keyring（access token + RT + 设备私钥）+ `state.Clear()` → 回向导（静默）。
+  - **纯网络不可达**（超时 / 连接拒绝），3 次仍失败 → **阻止**：隧道 / 防火墙 / 本地一律不动（仍连接、仍登录）→ 弹**两键**窗「取消（默认，保持原样）/ 仍要强制退出」。
+  - 会话过期（401）→ 经 024 惰性刷新通常已自动续期；若刷新也失败 → 拉起重新登录，成功后重试删除，用户取消重登 = 中止退出、保持原样。
+  - 5xx / 证书变更（非网络错）→ **不阻止**，沿用 017 现有「清本地 + 警告可能残留」路径。
+- **强制退出逃生口**：弹窗选「仍要强制退出」→ 走 017 旧的完整拆除（断隧道、清防火墙、清本地），**接受服务端残留**孤儿 node。
+- **i18n**：阻止弹窗标题 / 正文 / 两键、强制退出文案 zh-Hans + en 双语。
+
+**DESIGN.md 修订（同 PR）**
+- §11 / onboarding 描述：退出登录由「离线也能退、仅警告残留」改为「网络不可达时默认阻止以避免残留，提供显式强制退出逃生口」。
+
+**验收**
+- 服务器可达：退登确认 → 远端 node 删除 + 本设备 RT 吊销（服务端 `refresh_tokens` 该行 `revoked_at` 置位）+ 本地清空 + 回向导。
+- 服务器网络不可达：退登 → 3 次 1s 重试后弹两键窗；选「取消」→ 仍连接仍登录、本地无任何变化；选「强制退出」→ 完整拆除回向导（接受残留）。
+- 客户端 headless 测（`panel.Controller` + fake 边界）：网络错重试 3 次后进阻止分支、不清本地；确认删除分支调 `/logout` 吊销 RT 并清本地；401 → 刷新 / 重登重试。
+- GUI 弹窗（Fyne `//go:build gui`）：Mesa OpenGL VM 上手工核对两键窗与强制退出路径。
+
+**不做**
+- 对 5xx / 证书错误也阻止（本期阻止只限网络层不可达）。
+- 显式「重试」按钮（两键：取消 / 强制退出；手动重试 = 关窗再点退出）。
+- 服务端侧孤儿 node 清理工具（残留仍靠 admin 删用户 / 后续运维）。
+
+**依赖 / 关联**
+- 017（退出登录编排、`DeleteNode`、`confirmLogout`）、024（refresh-token 吊销端点 + 惰性刷新使 401 分支基本消失）、018（防火墙拆除在登出路径）。
 
 ---
 

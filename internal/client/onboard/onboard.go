@@ -33,6 +33,9 @@ type apiClient interface {
 	// Token returns the session token set by Login; persisted after a successful
 	// Provision so the panel reuses the session without a second sign-in.
 	Token() string
+	// RefreshToken returns the refresh token set by Login; persisted alongside the
+	// session token so the panel can silently renew without re-prompting.
+	RefreshToken() string
 }
 
 // The real REST client must satisfy the onboarding interface.
@@ -128,6 +131,11 @@ func (p *Provisioner) Provision(c Credentials, nodeName string) (state.Record, e
 	if err := p.Keys.Set(keyring.SessionTokenName, []byte(p.API.Token())); err != nil {
 		return state.Record{}, fmt.Errorf("cache session: %w", err)
 	}
+	// Persist the refresh token next to the session token (same final, all-succeeded
+	// point) so the panel can silently renew the access token on its next launch.
+	if err := p.Keys.Set(keyring.RefreshTokenName, []byte(p.API.RefreshToken())); err != nil {
+		return state.Record{}, fmt.Errorf("cache refresh token: %w", err)
+	}
 	return rec, nil
 }
 
@@ -156,12 +164,14 @@ func (p *Provisioner) registerDevice(nodeName, pub string) (string, error) {
 	}
 }
 
-// Cleanup deletes the stored device key and cached session token and clears any partial
-// state record so a cancelled or failed setup leaves the machine fresh for the next launch.
+// Cleanup deletes the stored device key, the cached session and refresh tokens, and clears
+// any partial state record so a cancelled or failed setup leaves the machine fresh for the
+// next launch.
 func (p *Provisioner) Cleanup() error {
 	return errors.Join(
 		p.Keys.Delete(p.keyName()),
 		p.Keys.Delete(keyring.SessionTokenName),
+		p.Keys.Delete(keyring.RefreshTokenName),
 		state.Clear(p.StatePath),
 	)
 }

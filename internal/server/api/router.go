@@ -56,6 +56,12 @@ func NewRouter(opts Options) http.Handler {
 	// Public (rate-limited) endpoints.
 	mux.HandleFunc("POST /api/v1/login", h.login)
 	mux.HandleFunc("POST /api/v1/register", h.register)
+	// Refresh is public: it authenticates via the refresh token in the body because
+	// the access JWT is expired at refresh time (NO AuthRequired).
+	mux.HandleFunc("POST /api/v1/refresh", h.refresh)
+	// Logout is public for the same reason: it revokes the refresh token in the body
+	// even when the access JWT is already expired (NO AuthRequired).
+	mux.HandleFunc("POST /api/v1/logout", h.logout)
 
 	// Authenticated endpoints.
 	mux.Handle("GET /api/v1/me", AuthRequired(opts.JWT)(http.HandlerFunc(h.me)))
