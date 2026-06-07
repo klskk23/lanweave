@@ -78,9 +78,11 @@ func (z *Wizard) render(title string, body fyne.CanvasObject, onBack, onNext fun
 		note := widget.NewLabelWithStyle(i18n.T("trust.selfSignedNote"), fyne.TextAlignLeading, fyne.TextStyle{})
 		topObj = container.NewVBox(note, header)
 	}
-	// The language selector sits at the very top of every wizard step (FR-003).
+	// The language selector sits at the very top of every wizard step (FR-003). The step body is
+	// wrapped in the same rounded dark card as the panel's Hero for visual consistency (feature
+	// 022); the four-step flow and Back/Cancel/Next logic are unchanged.
 	top := container.NewVBox(newLanguageSelect(z.win), topObj)
-	z.win.SetContent(container.NewBorder(top, bar, nil, nil, container.NewVBox(body)))
+	z.win.SetContent(container.NewBorder(top, bar, nil, nil, card(container.NewVBox(body))))
 	z.win.Canvas().SetOnTypedKey(func(e *fyne.KeyEvent) {
 		switch e.Name {
 		case fyne.KeyEscape:

@@ -3,6 +3,7 @@ package tunnel
 import (
 	"errors"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 )
@@ -12,6 +13,7 @@ import (
 type fakeEngine struct {
 	upErr      error
 	hs         bool
+	rx, tx     int64
 	upCalls    int
 	closeCalls int
 }
@@ -23,8 +25,9 @@ func (f *fakeEngine) up(_ string, _ netip.Addr, _ netip.Prefix) (string, error) 
 	}
 	return "lwtest0", nil
 }
-func (f *fakeEngine) handshaked() (bool, error) { return f.hs, nil }
-func (f *fakeEngine) close() error              { f.closeCalls++; return nil }
+func (f *fakeEngine) handshaked() (bool, error)       { return f.hs, nil }
+func (f *fakeEngine) transfer() (int64, int64, error) { return f.rx, f.tx, nil }
+func (f *fakeEngine) close() error                    { f.closeCalls++; return nil }
 
 func newTestTunnel(t *testing.T, eng *fakeEngine) *Tunnel {
 	t.Helper()
@@ -94,5 +97,50 @@ func TestConnectNoSetup(t *testing.T) {
 	tn := New(rec, "") // no private key
 	if err := tn.Connect(); !errors.Is(err, ErrNoSetup) {
 		t.Errorf("connect without key: got %v, want ErrNoSetup", err)
+	}
+}
+
+// sumTransfer must add up the per-peer rx_bytes=/tx_bytes= counters across every peer line in
+// the WireGuard UAPI text, ignoring all other fields (FR-012).
+func TestSumTransferMultiPeer(t *testing.T) {
+	uapi := strings.Join([]string{
+		"private_key=00",
+		"public_key=aa",
+		"last_handshake_time_sec=123",
+		"rx_bytes=1000",
+		"tx_bytes=2000",
+		"public_key=bb",
+		"last_handshake_time_sec=456",
+		"rx_bytes=40",
+		"tx_bytes=7",
+		"",
+	}, "\n")
+	rx, tx := sumTransfer(uapi)
+	if rx != 1040 || tx != 2007 {
+		t.Errorf("sumTransfer = (rx %d, tx %d), want (1040, 2007)", rx, tx)
+	}
+	if rx, tx := sumTransfer("errno=0\n\n"); rx != 0 || tx != 0 {
+		t.Errorf("sumTransfer(no peers) = (%d, %d), want (0, 0)", rx, tx)
+	}
+}
+
+// Transfer reports the engine's totals while connected, and (0,0,nil) — not an error — when
+// there is no engine (disconnected), so the Hero can simply hide the counters.
+func TestTransferConnectedAndDisconnected(t *testing.T) {
+	eng := &fakeEngine{hs: true, rx: 1040, tx: 2007}
+	tn := newTestTunnel(t, eng)
+	if err := tn.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	rx, tx, err := tn.Transfer()
+	if err != nil || rx != 1040 || tx != 2007 {
+		t.Fatalf("Transfer connected = (%d, %d, %v), want (1040, 2007, nil)", rx, tx, err)
+	}
+	if err := tn.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	rx, tx, err = tn.Transfer()
+	if err != nil || rx != 0 || tx != 0 {
+		t.Errorf("Transfer disconnected = (%d, %d, %v), want (0, 0, nil)", rx, tx, err)
 	}
 }
