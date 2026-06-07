@@ -31,7 +31,7 @@
 | 018 | client-firewall-and-tofu-pin ✅          | 客户端     | 010, 017   | 客户端可开关入站防火墙规则放行 VPN 网段(默认关);证书首次信任后钉扎(TOFU),取代 017 会话级 insecure |
 | 019 | client-session-persist-fix ✅           | 客户端     | 009, 011   | 向导登录/注册完成后直接进面板,不再二次要求登录;冷启动复用已缓存会话 |
 | 020 | client-i18n ✅                           | 客户端     | 009, 011   | 客户端 UI 中/英双语,启动按系统语言,可手动切换(重启生效) |
-| 021 | server-http-mode                        | 服务端     | 001        | 服务端可配 tls=false 监听明文 HTTP(供反代终止 TLS);默认仍 HTTPS,缺 cert 仍硬失败,现存配置不降级 |
+| 021 | server-http-mode ✅                      | 服务端     | 001        | 服务端可配 tls=false 监听明文 HTTP(供反代终止 TLS);默认仍 HTTPS,缺 cert 仍硬失败,现存配置不降级 |
 
 ---
 
