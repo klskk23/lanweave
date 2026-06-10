@@ -67,12 +67,21 @@ type ServerConfig struct {
 	TLSCert string `toml:"tls_cert"`
 	TLSKey  string `toml:"tls_key"`
 	DataDir string `toml:"data_dir"`
+	// APIDocs is a three-state pointer mirroring TLS: nil (key absent) and true
+	// both expose the Swagger UI / OpenAPI document under /api/docs/; only an
+	// explicit `api_docs = false` hides it. When hidden the docs routes are not
+	// registered at all, so they are indistinguishable from unknown paths.
+	APIDocs *bool `toml:"api_docs"`
 }
 
 // TLSEnabled reports whether the control plane listens over HTTPS. It is
 // nil-safe: an absent toggle reads as enabled, so the safe default holds even
 // on a path that skipped defaulting.
 func (s ServerConfig) TLSEnabled() bool { return s.TLS == nil || *s.TLS }
+
+// APIDocsEnabled reports whether the API documentation page is exposed. It is
+// nil-safe: an absent toggle reads as enabled (docs are on by default).
+func (s ServerConfig) APIDocsEnabled() bool { return s.APIDocs == nil || *s.APIDocs }
 
 // WarnPlaintextExposure reports whether a startup warning is warranted: the
 // control plane is plaintext AND bound to a non-loopback address (so it could

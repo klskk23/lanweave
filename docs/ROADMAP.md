@@ -1,6 +1,5 @@
 # lanweave —— 实施路线（spec-kit /specify 候选清单）
 
-> 状态：v1 设计冻结，按下表 12 个 feature 逐步切；013 为部署联调发现的加固修复，014 为 CI/CD 自动化，015 为创建 zone 自动入组的体验完善，016 为 Windows 客户端图标补齐，017 为客户端退出登录 + insecure-TLS 可交互，018 为客户端防火墙控制 + TOFU 证书钉扎（取代 017 会话级 insecure），019 为修复 onboarding 会话 token 未落盘导致进面板二次要求登录，020 为客户端 GUI 中文/英文双语（汉化），021 为服务端可选明文 HTTP 监听（供反向代理终止 TLS），022 为客户端主页面与 Wizard 视觉改版（按 `UI-DESIGN.md`/`UI-example.png`，Material 3 启发的深色 flat 风格）；023 为每用户设备 / 拥有-zone 配额上限（配置文件全局值，默认各 10，0=无限制，admin 豁免）；024 为会话 refresh token（登录发 access+refresh，access 2h 过期客户端用 refresh token 静默换新，不再每 2h 重输密码；RT 30天滑动、服务端存哈希可吊销）；025 为退出登录加固（服务器网络不可达时阻止退出以避免残留孤儿 node，含「强制退出」逃生口，登出吊销本设备 refresh token）；026 为邀请码有效期（admin 邀请码默认 24h 过期，由配置 `invite_ttl` 控制，`0`/空=永不过期；旧码祖父化永久有效；过期码注册被拒并归入通用「邀请码无效」）。
 > 设计文档：`../DESIGN.md`
 > 用法：每个 feature 单独 `/specify`，独立 spec / plan / tests / implementation。
 > 顺序按依赖排，原则上前置 feature 完成后再开下一个。
@@ -32,13 +31,14 @@
 | 019 | client-session-persist-fix ✅           | 客户端     | 009, 011   | 向导登录/注册完成后直接进面板,不再二次要求登录;冷启动复用已缓存会话 |
 | 020 | client-i18n ✅                           | 客户端     | 009, 011   | 客户端 UI 中/英双语,启动按系统语言,可手动切换(重启生效) |
 | 021 | server-http-mode ✅                      | 服务端     | 001        | 服务端可配 tls=false 监听明文 HTTP(供反代终止 TLS);默认仍 HTTPS,缺 cert 仍硬失败,现存配置不降级 |
-| 022 | client-ui-redesign                      | 客户端     | 010, 011, 020 | 主页面+Wizard 按 UI-DESIGN.md/UI-example.png 重做(Material 3 深色 flat):自定义主题/App Bar+overflow/Hero 卡片/列表 avatar+状态点/Switch/区域详情页/流量计数;Wizard 仅套主题,客户端行为零回归 |
+| 022 | client-ui-redesign ✅                   | 客户端     | 010, 011, 020 | 主页面+Wizard 按 UI-DESIGN.md/UI-example.png 重做(Material 3 深色 flat):自定义主题/App Bar+overflow/Hero 卡片/列表 avatar+状态点/Switch/区域详情页/流量计数;Wizard 仅套主题,客户端行为零回归 |
 | 023 | per-user-limits ✅                       | 服务端/客户端 | 002, 004, 005, 020 | 每用户设备数 + 拥有-zone 数配额(配置全局值,默认各 10,0=无限,admin 豁免);超限 409,删除释放名额,下调上限只挡新增 |
-| 024 | session-refresh-tokens                   | 服务端/客户端 | 002, 009, 019 | 登录返回 access + refresh token;access 2h 过期时客户端用 refresh token 静默换新,不再每 2h 弹密码;RT 30天滑动、服务端存哈希可逐条吊销 |
-| 025 | client-logout-hardening                  | 客户端     | 017, 024   | 退出登录时服务器 API 网络不可达(3 次 1s 重试仍失败)则阻止退出 + 弹窗(取消 / 强制退出逃生口),避免残留孤儿 node;登出额外吊销本设备 RT |
-| 026 | invite-expiry                            | 服务端     | 002        | 邀请码有有效期:配置 `invite_ttl` 全局默认 24h,建码时写 `expires_at=created_at+ttl`;`0`/空 与旧码=NULL=永不过期;过期码注册被拒并归入通用「邀请码无效」 |
-| 027 | password-complexity                      | 服务端/客户端 | 002, 009   | 账号密码复杂度:8–64 ASCII 字符,至少含大写+小写+数字,无空格/非 ASCII;共享 `pkg/passwordpolicy` 单一真源,服务端注册时权威拦截(`validation_error`),客户端向导本地逐条提示+常驻规则说明;**仅注册生效**,登录不校验(旧弱密码/bootstrap admin 不受影响);zone 密码范围外 |
-| 028 | tunnel-auto-reconnect                    | 客户端     | 010, 011, 018 | 握手陈旧自愈重连:新起 health goroutine 每 15s 查 wg 最后握手,已连接但 age>240s 自动重连;`desiredConnected` 仅内存态(手动连成功置真/手动断开置假),重连失败每 15s 重试到底(无退避),手动断开必胜(单飞守卫);重试中 UI 黄灯+按钮显「断开」、全程静默;wg 源端口本即 OS 随机临时端口(已满足,仅文档化) |
+| 024 | session-refresh-tokens ✅                | 服务端/客户端 | 002, 009, 019 | 登录返回 access + refresh token;access 2h 过期时客户端用 refresh token 静默换新,不再每 2h 弹密码;RT 30天滑动、服务端存哈希可逐条吊销 |
+| 025 | client-logout-hardening ✅               | 客户端     | 017, 024   | 退出登录时服务器 API 网络不可达(3 次 1s 重试仍失败)则阻止退出 + 弹窗(取消 / 强制退出逃生口),避免残留孤儿 node;登出额外吊销本设备 RT |
+| 026 | invite-expiry ✅                         | 服务端     | 002        | 邀请码有有效期:配置 `invite_ttl` 全局默认 24h,建码时写 `expires_at=created_at+ttl`;`0`/空 与旧码=NULL=永不过期;过期码注册被拒并归入通用「邀请码无效」 |
+| 027 | password-complexity ✅                   | 服务端/客户端 | 002, 009   | 账号密码复杂度:8–64 ASCII 字符,至少含大写+小写+数字,无空格/非 ASCII;共享 `pkg/passwordpolicy` 单一真源,服务端注册时权威拦截(`validation_error`),客户端向导本地逐条提示+常驻规则说明;**仅注册生效**,登录不校验(旧弱密码/bootstrap admin 不受影响);zone 密码范围外 |
+| 028 | tunnel-auto-reconnect ✅                 | 客户端     | 010, 011, 018 | 握手陈旧自愈重连:新起 health goroutine 每 15s 查 wg 最后握手,已连接但 age>240s 自动重连;`desiredConnected` 仅内存态(手动连成功置真/手动断开置假),重连失败每 15s 重试到底(无退避),手动断开必胜(单飞守卫);重试中 UI 黄灯+按钮显「断开」、全程静默;wg 源端口本即 OS 随机临时端口(已满足,仅文档化) |
+| 029 | swagger-ui ✅                            | 服务端     | 001, 002   | 服务端 `/api/docs/` 暴露自包含 Swagger UI + 手写 OpenAPI 3 文档(21 个操作,错误码/鉴权全标注,全英文);`[server] api_docs` 三态开关缺省=开启,关闭后与未知路径逐字节同 404;路由表重构为单一真源,文档-路由双向一致性测试防漂移;零新增 Go 运行时依赖(swagger-ui-dist 5.32.6 vendor 入仓) |
 
 ---
 
