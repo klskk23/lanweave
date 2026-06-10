@@ -6,7 +6,7 @@
 - [x] 服务端shell管理脚本 
 - [x] jwt refresh-token
 ## MEDIUM
-- [ ] 暴露 swagger 页面
+- [x] 暴露 swagger 页面
 - [ ] 集成Let's Encrypt自动续签
 ## LOW
 - [ ] SMTP邮件自助注册，会发送邀请码到邮箱 ,这个功能可以在配置文件开关
@@ -25,7 +25,7 @@
 ## HIGH
 - [x] 密码复杂性校验，至少8个字符包含大小写字母和数字
 ## MEDIUM
-- [ ] 设备路由宣告到区域
+- [ ] 添加节点宣告子网到ZONE中的功能
 ## LOW
 - [ ]  使用 dockerfile 和 docker-compose 部署 增加环境变量处理用来代替 CONFIG配置
 - [ ] 构建叠加层，使用wstunnel连接wg隧道，可以 fallback 到普通wg隧道，服务端监听所有协议，客户端手动选择混淆，用于穿透GFW. 或者[ lwo ](https://github.com/ClusterM/wg-obfuscator) quic-go/masque-go, 别忘了MSS限制
