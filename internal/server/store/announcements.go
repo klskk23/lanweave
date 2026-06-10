@@ -182,16 +182,9 @@ func (r *AnnouncementRepo) Detach(ctx context.Context, zoneID, annID int64) (*An
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, false, ErrAnnouncementNotFound
 	}
-	var remaining int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM announcement_zones WHERE announcement_id = ?`, annID).Scan(&remaining); err != nil {
-		return nil, false, fmt.Errorf("count attachments: %w", err)
-	}
-	reclaimed := remaining == 0
-	if reclaimed {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM announcements WHERE id = ?`, annID); err != nil {
-			return nil, false, fmt.Errorf("delete announcement: %w", err)
-		}
+	reclaimed, err := reclaimIfOrphaned(ctx, tx, annID)
+	if err != nil {
+		return nil, false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, false, fmt.Errorf("commit detach: %w", err)
@@ -207,6 +200,25 @@ func (r *AnnouncementRepo) Get(ctx context.Context, annID int64) (*Announcement,
 // rowQueryer is satisfied by both *sql.DB and *sql.Tx.
 type rowQueryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// reclaimIfOrphaned deletes the announcement body when its last zone attachment
+// is gone, freeing the synthetic block. Shared by every detach path (single
+// detach, node-zone cascade, zone-wide cascade) so the reclaim rule lives in
+// exactly one place.
+func reclaimIfOrphaned(ctx context.Context, tx *sql.Tx, annID int64) (bool, error) {
+	var remaining int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM announcement_zones WHERE announcement_id = ?`, annID).Scan(&remaining); err != nil {
+		return false, fmt.Errorf("count attachments: %w", err)
+	}
+	if remaining > 0 {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM announcements WHERE id = ?`, annID); err != nil {
+		return false, fmt.Errorf("reclaim announcement: %w", err)
+	}
+	return true, nil
 }
 
 func getAnnouncementTx(ctx context.Context, tx rowQueryer, annID int64) (*Announcement, error) {
@@ -378,16 +390,9 @@ WHERE az.zone_id = ? AND a.node_id = ?`, zoneID, nodeID)
 			`DELETE FROM announcement_zones WHERE announcement_id = ? AND zone_id = ?`, rc.id, zoneID); err != nil {
 			return nil, fmt.Errorf("detach: %w", err)
 		}
-		var remaining int
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM announcement_zones WHERE announcement_id = ?`, rc.id).Scan(&remaining); err != nil {
-			return nil, fmt.Errorf("count attachments: %w", err)
-		}
-		reclaimed := remaining == 0
-		if reclaimed {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM announcements WHERE id = ?`, rc.id); err != nil {
-				return nil, fmt.Errorf("reclaim announcement: %w", err)
-			}
+		reclaimed, err := reclaimIfOrphaned(ctx, tx, rc.id)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, DetachedRoute{AnnouncementID: rc.id, Synthetic: rc.block.Prefix(), Reclaimed: reclaimed})
 	}
@@ -518,17 +523,11 @@ WHERE az.zone_id = ?`, zoneID)
 		return nil, fmt.Errorf("detach zone: %w", err)
 	}
 	for i := range dets {
-		var remaining int
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM announcement_zones WHERE announcement_id = ?`, dets[i].AnnouncementID).Scan(&remaining); err != nil {
-			return nil, fmt.Errorf("count attachments: %w", err)
+		reclaimed, err := reclaimIfOrphaned(ctx, tx, dets[i].AnnouncementID)
+		if err != nil {
+			return nil, err
 		}
-		if remaining == 0 {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM announcements WHERE id = ?`, dets[i].AnnouncementID); err != nil {
-				return nil, fmt.Errorf("reclaim announcement: %w", err)
-			}
-			dets[i].Reclaimed = true
-		}
+		dets[i].Reclaimed = reclaimed
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit zone-detach: %w", err)

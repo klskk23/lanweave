@@ -159,7 +159,9 @@ func (h *handlers) validAnnouncedSubnet(prefix netip.Prefix) (string, bool) {
 			return "Subnet overlaps the VPN address pool.", false
 		}
 	}
-	if ipam.Overlaps(block, ipam.BlockFromPrefix(h.announcePool)) {
+	// Defense in depth: the announce_disabled guard runs before validation, but
+	// an invalid (zero) pool must never reach block math.
+	if h.announcePool.IsValid() && ipam.Overlaps(block, ipam.BlockFromPrefix(h.announcePool)) {
 		return "Subnet overlaps the synthetic address pool.", false
 	}
 	return "", true
