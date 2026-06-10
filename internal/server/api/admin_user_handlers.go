@@ -60,5 +60,24 @@ func (h *handlers) deleteUser(w http.ResponseWriter, r *http.Request) {
 			h.log.Error("failed to delete owned zone's rules", "user_id", targetID, "zone_id", zid, "error", err.Error())
 		}
 	}
+	// Announced blocks of the deleted user attached to surviving zones: remove
+	// the route elements (owned zones' sets were destroyed wholesale above).
+	for _, route := range result.SurvivingZoneRoutes {
+		if err := h.netfw.RemoveZoneRoute(route.ZoneID, route.Synthetic); err != nil {
+			h.log.Error("failed to remove zone route for deleted user", "user_id", targetID, "zone_id", route.ZoneID, "error", err.Error())
+		}
+	}
+	// Surviving nodes (other users') whose announcements were orphaned by the
+	// owned-zone cascade: their peers' AllowedIPs shrink to the recomputed set.
+	for _, n := range result.RouteRecomputeNodes {
+		routes, err := h.store.Announcements().RoutesForNode(r.Context(), n.NodeID)
+		if err != nil {
+			h.log.Error("failed to recompute routes for surviving node", "node_id", n.NodeID, "error", err.Error())
+			continue
+		}
+		if err := h.wg.SetPeerRoutes(n.PubKey, n.IP, routes); err != nil {
+			h.log.Error("failed to update surviving node's peer routes", "node_id", n.NodeID, "error", err.Error())
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

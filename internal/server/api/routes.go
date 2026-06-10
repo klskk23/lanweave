@@ -48,6 +48,12 @@ func routes(h *handlers, opts Options) []route {
 		{"POST /api/v1/zones/{name}/leave", authed(http.HandlerFunc(h.leaveZone))},
 		{"GET /api/v1/zones/{name}/members", authed(http.HandlerFunc(h.zoneMembers))},
 
+		// Subnet announcements (any member; detach additionally allowed for the
+		// zone owner — authorization inside the handlers).
+		{"POST /api/v1/zones/{name}/announcements", authed(http.HandlerFunc(h.createAnnouncement))},
+		{"GET /api/v1/zones/{name}/announcements", authed(http.HandlerFunc(h.listAnnouncements))},
+		{"DELETE /api/v1/zones/{name}/announcements/{id}", authed(http.HandlerFunc(h.deleteAnnouncement))},
+
 		// Zone owner controls (owner only).
 		{"PATCH /api/v1/zones/{name}", authed(http.HandlerFunc(h.changeZonePassword))},
 		{"DELETE /api/v1/zones/{name}", authed(http.HandlerFunc(h.deleteZone))},

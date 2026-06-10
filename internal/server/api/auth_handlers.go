@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -45,6 +46,10 @@ type handlers struct {
 	// the store, substituting 0 for an admin caller so admin reuses the unlimited path.
 	maxDevicesPerUser    int
 	maxOwnedZonesPerUser int
+	// announcePool / maxAnnouncedSubnetsPerUser configure subnet announcements
+	// (feature 030); an invalid pool disables the feature.
+	announcePool               netip.Prefix
+	maxAnnouncedSubnetsPerUser int
 	// inviteTTL is the window stamped onto codes minted via createInvite
 	// (0 = never expire).
 	inviteTTL time.Duration

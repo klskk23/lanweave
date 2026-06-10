@@ -129,6 +129,23 @@ type SurvivingMembership struct {
 	ZoneID int64
 }
 
+// SurvivingZoneRoute is a deleted user's announced synthetic block attached to a
+// zone owned by someone else: that zone's routes set survives and must lose the
+// element individually.
+type SurvivingZoneRoute struct {
+	ZoneID    int64
+	Synthetic netip.Prefix
+}
+
+// RouteRecomputeNode is a *surviving* node (another user's) whose announcement
+// lost its last attachment because the deleted user owned the only zones it was
+// announced into; its peer AllowedIPs must be recomputed after the reclaim.
+type RouteRecomputeNode struct {
+	NodeID int64
+	PubKey string
+	IP     netip.Addr
+}
+
 // DeletionResult reports the data-plane footprint of a deleted user so the caller can
 // reconcile the live tunnel and isolation rules with the post-delete database (the rows
 // themselves are already gone).
@@ -136,6 +153,8 @@ type DeletionResult struct {
 	NodePubKeys          []string
 	SurvivingMemberships []SurvivingMembership
 	OwnedZoneIDs         []int64
+	SurvivingZoneRoutes  []SurvivingZoneRoute
+	RouteRecomputeNodes  []RouteRecomputeNode
 }
 
 // DeleteCascade removes a user and everything attributable to them in one atomic
@@ -205,9 +224,84 @@ WHERE n.user_id = ? AND z.owner_user_id <> ?`, targetID, targetID)
 	}
 	_ = memRows.Close()
 
+	// The deleted user's announced blocks attached to zones owned by someone else:
+	// those zones' routes sets survive and lose the elements individually (the
+	// user's own zones are destroyed wholesale, announcements die with the nodes).
+	routeRows, err := tx.QueryContext(ctx, `
+SELECT az.zone_id, a.synthetic_base, a.prefix_len
+FROM announcement_zones az
+JOIN announcements a ON a.id = az.announcement_id
+JOIN nodes n ON n.id = a.node_id
+JOIN zones z ON z.id = az.zone_id
+WHERE n.user_id = ? AND z.owner_user_id <> ?`, targetID, targetID)
+	if err != nil {
+		return nil, fmt.Errorf("gather surviving zone routes: %w", err)
+	}
+	for routeRows.Next() {
+		var (
+			zoneID, base int64
+			prefixLen    int
+		)
+		if err := routeRows.Scan(&zoneID, &base, &prefixLen); err != nil {
+			_ = routeRows.Close()
+			return nil, fmt.Errorf("scan zone route: %w", err)
+		}
+		result.SurvivingZoneRoutes = append(result.SurvivingZoneRoutes, SurvivingZoneRoute{
+			ZoneID:    zoneID,
+			Synthetic: ipam.Block{Base: uint32(base), PrefixLen: prefixLen}.Prefix(),
+		})
+	}
+	if err := routeRows.Err(); err != nil {
+		_ = routeRows.Close()
+		return nil, fmt.Errorf("iterate zone routes: %w", err)
+	}
+	_ = routeRows.Close()
+
 	if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, targetID); err != nil {
 		return nil, fmt.Errorf("delete user: %w", err)
 	}
+
+	// Deleting the user's owned zones cascaded away attachments of *other users'*
+	// announcements; any announcement left with zero attachments is an orphan whose
+	// synthetic block would leak — reclaim it here and report its (surviving) node
+	// so the caller can shrink that peer's AllowedIPs.
+	orphanRows, err := tx.QueryContext(ctx, `
+SELECT a.id, a.node_id, n.wg_pubkey, n.ip
+FROM announcements a JOIN nodes n ON n.id = a.node_id
+WHERE a.id NOT IN (SELECT announcement_id FROM announcement_zones)`)
+	if err != nil {
+		return nil, fmt.Errorf("gather orphan announcements: %w", err)
+	}
+	var orphanIDs []int64
+	seenNode := map[int64]bool{}
+	for orphanRows.Next() {
+		var (
+			annID, nodeID, ipVal int64
+			pubKey               string
+		)
+		if err := orphanRows.Scan(&annID, &nodeID, &pubKey, &ipVal); err != nil {
+			_ = orphanRows.Close()
+			return nil, fmt.Errorf("scan orphan: %w", err)
+		}
+		orphanIDs = append(orphanIDs, annID)
+		if !seenNode[nodeID] {
+			seenNode[nodeID] = true
+			result.RouteRecomputeNodes = append(result.RouteRecomputeNodes, RouteRecomputeNode{
+				NodeID: nodeID, PubKey: pubKey, IP: ipam.Uint32ToAddr(uint32(ipVal)),
+			})
+		}
+	}
+	if err := orphanRows.Err(); err != nil {
+		_ = orphanRows.Close()
+		return nil, fmt.Errorf("iterate orphans: %w", err)
+	}
+	_ = orphanRows.Close()
+	for _, annID := range orphanIDs {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM announcements WHERE id = ?`, annID); err != nil {
+			return nil, fmt.Errorf("reclaim orphan announcement: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit delete: %w", err)
 	}

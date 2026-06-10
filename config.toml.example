@@ -25,6 +25,13 @@ data_dir = "/var/lib/lanweave"
 # exactly like any unknown path.
 # api_docs = true
 
+[announce]
+# Synthetic block pool for subnet announcements (feature 030). Omitted/empty =
+# announcements disabled (announce API answers announce_disabled). When set it
+# must be an IPv4 CIDR that does not overlap wireguard.network; pick a CGNAT
+# sub-range, e.g.:
+# pool = "100.100.0.0/16"
+
 [log]
 # debug | info | warn | error  (default: info)
 level = "info"
@@ -79,3 +86,6 @@ password = "CHANGE-ME-ON-FIRST-LOGIN"
 # and are simply blocked from adding more until they drop back under the cap.
 # max_devices_per_user     = 10
 # max_owned_zones_per_user = 10
+# Max announced subnets per user (feature 030). Unset = 10, 0 = unlimited; admins
+# are exempt. Counts announcements, not zone attachments.
+# max_announced_subnets_per_user = 10

@@ -4,6 +4,7 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -41,6 +42,13 @@ type Options struct {
 	// through to the API-wide notFound and stay indistinguishable from paths
 	// that never existed.
 	APIDocs bool
+	// AnnouncePool is the synthetic block pool for subnet announcements. The
+	// zero value (invalid prefix) means the feature is disabled: announce writes
+	// answer announce_disabled while listings return empty.
+	AnnouncePool netip.Prefix
+	// MaxAnnouncedSubnetsPerUser is the resolved per-user announcement cap
+	// (0 = unlimited), mirroring the device/zone caps above.
+	MaxAnnouncedSubnetsPerUser int
 }
 
 // NewRouter returns the fully wrapped handler. Middleware order, outermost first:
@@ -48,17 +56,19 @@ type Options struct {
 // opt into AuthRequired (and AdminRequired) wrappers.
 func NewRouter(opts Options) http.Handler {
 	h := &handlers{
-		store:                opts.Store,
-		jwt:                  opts.JWT,
-		log:                  opts.Logger,
-		version:              opts.Version,
-		wg:                   opts.WG,
-		netfw:                opts.NetFW,
-		wgConfig:             opts.WGConfig,
-		status:               opts.Status,
-		maxDevicesPerUser:    opts.MaxDevicesPerUser,
-		maxOwnedZonesPerUser: opts.MaxOwnedZonesPerUser,
-		inviteTTL:            opts.InviteTTL,
+		store:                      opts.Store,
+		jwt:                        opts.JWT,
+		log:                        opts.Logger,
+		version:                    opts.Version,
+		wg:                         opts.WG,
+		netfw:                      opts.NetFW,
+		wgConfig:                   opts.WGConfig,
+		status:                     opts.Status,
+		maxDevicesPerUser:          opts.MaxDevicesPerUser,
+		maxOwnedZonesPerUser:       opts.MaxOwnedZonesPerUser,
+		inviteTTL:                  opts.InviteTTL,
+		announcePool:               opts.AnnouncePool,
+		maxAnnouncedSubnetsPerUser: opts.MaxAnnouncedSubnetsPerUser,
 	}
 
 	mux := http.NewServeMux()

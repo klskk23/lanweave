@@ -52,6 +52,16 @@ func newNodeHarness(t *testing.T) *nodeHarness { return newNodeHarnessLimited(t,
 // newNodeHarnessLimited is newNodeHarness with explicit per-user caps wired into the
 // router (0 = unlimited), so cap-enforcement acceptance tests can drive the limits.
 func newNodeHarnessLimited(t *testing.T, maxDevices, maxOwnedZones int) *nodeHarness {
+	return newNodeHarnessWith(t, func(o *api.Options) {
+		o.MaxDevicesPerUser = maxDevices
+		o.MaxOwnedZonesPerUser = maxOwnedZones
+	})
+}
+
+// newNodeHarnessWith builds the full privileged harness (real store + wg + nft)
+// and lets the caller adjust router Options before construction (announce pool,
+// caps, ...).
+func newNodeHarnessWith(t *testing.T, mutate func(*api.Options)) *nodeHarness {
 	t.Helper()
 	testutil.RequireNetAdmin(t)
 
@@ -96,14 +106,16 @@ func newNodeHarnessLimited(t *testing.T, maxDevices, maxOwnedZones int) *nodeHar
 	})
 
 	jwtMgr := auth.NewJWTManager(harnessJWTSecret, time.Hour)
-	router := api.NewRouter(api.Options{
+	opts := api.Options{
 		Version: "test", Limiter: rate.NewLimiter(rate.Limit(10000), 10000),
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Store:  st, JWT: jwtMgr, WG: srv, NetFW: mgr, WGConfig: wgCfg,
-		Status:               &fakeStatus{handshakes: map[string]time.Time{}},
-		MaxDevicesPerUser:    maxDevices,
-		MaxOwnedZonesPerUser: maxOwnedZones,
-	})
+		Status: &fakeStatus{handshakes: map[string]time.Time{}},
+	}
+	if mutate != nil {
+		mutate(&opts)
+	}
+	router := api.NewRouter(opts)
 	return &nodeHarness{t: t, router: router, store: st, jwt: jwtMgr, wgName: wgName, wgCfg: wgCfg, nftName: nftName}
 }
 
@@ -321,7 +333,7 @@ func TestRegisterNodeGrandfathering(t *testing.T) {
 	// ...but seed 4 devices directly, as if registered under an earlier, higher cap.
 	first, last, _ := ipam.PoolRange("100.127.0.0/16")
 	for i := range 4 {
-		if _, err := h.store.Nodes().Create(context.Background(), uid, fmt.Sprintf("old%d", i), nodePubKey(t), first, last, 0); err != nil {
+		if _, err := h.store.Nodes().Create(context.Background(), uid, fmt.Sprintf("old%d", i), nodePubKey(t), "unknown", first, last, 0); err != nil {
 			t.Fatalf("seed pre-existing device %d: %v", i, err)
 		}
 	}
@@ -395,10 +407,10 @@ func TestListNodesOnlineStatus(t *testing.T) {
 	}
 	onlinePub := nodePubKey(t)
 	neverPub := nodePubKey(t)
-	if _, err := h.store.Nodes().Create(ctx, u.ID, "connected", onlinePub, first, last, 0); err != nil {
+	if _, err := h.store.Nodes().Create(ctx, u.ID, "connected", onlinePub, "unknown", first, last, 0); err != nil {
 		t.Fatalf("seed connected node: %v", err)
 	}
-	if _, err := h.store.Nodes().Create(ctx, u.ID, "never", neverPub, first, last, 0); err != nil {
+	if _, err := h.store.Nodes().Create(ctx, u.ID, "never", neverPub, "unknown", first, last, 0); err != nil {
 		t.Fatalf("seed never node: %v", err)
 	}
 	// connected handshaked just now → online; "never" is absent from the snapshot.
@@ -458,5 +470,59 @@ func TestDeleteNode(t *testing.T) {
 	// Double delete → 404.
 	if r := h.req(http.MethodDelete, idPath, aliceTok, nil); r.Code != http.StatusNotFound {
 		t.Errorf("double delete: status %d, want 404", r.Code)
+	}
+}
+
+// TestRegisterNodePlatform covers FR-001/FR-012 (slice 030): self-reported
+// platform round-trips, legacy registrations default to "unknown", and a
+// malformed value is rejected at the boundary.
+func TestRegisterNodePlatform(t *testing.T) {
+	h := newNodeHarness(t)
+	uid := h.seedUser("alice")
+	tok := h.token(uid)
+
+	rec := h.req(http.MethodPost, "/api/v1/nodes", tok,
+		protocol.RegisterNodeRequest{Name: "router", WGPubKey: nodePubKey(t), Platform: "openwrt"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("register status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var created protocol.NodeResponse
+	decodeJSONBody(t, rec.Body.Bytes(), &created)
+	if created.Platform != "openwrt" {
+		t.Errorf("created platform = %q, want openwrt", created.Platform)
+	}
+
+	// Pre-030 shape: no platform field at all → unknown (zero behavior change).
+	rec = h.req(http.MethodPost, "/api/v1/nodes", tok,
+		protocol.RegisterNodeRequest{Name: "legacy", WGPubKey: nodePubKey(t)})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("legacy register status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var legacy protocol.NodeResponse
+	decodeJSONBody(t, rec.Body.Bytes(), &legacy)
+	if legacy.Platform != "unknown" {
+		t.Errorf("legacy platform = %q, want unknown", legacy.Platform)
+	}
+
+	// Malformed platform is a boundary validation error.
+	rec = h.req(http.MethodPost, "/api/v1/nodes", tok,
+		protocol.RegisterNodeRequest{Name: "bad", WGPubKey: nodePubKey(t), Platform: "Open WRT!"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad platform status = %d, want 400", rec.Code)
+	}
+	if e := decodeError(t, rec); e.Error != "validation_error" {
+		t.Errorf("error = %q, want validation_error", e.Error)
+	}
+
+	// The list endpoint surfaces platform for every node.
+	rec = h.req(http.MethodGet, "/api/v1/nodes", tok, nil)
+	var list protocol.NodeListResponse
+	decodeJSONBody(t, rec.Body.Bytes(), &list)
+	seen := map[string]string{}
+	for _, n := range list.Nodes {
+		seen[n.Name] = n.Platform
+	}
+	if seen["router"] != "openwrt" || seen["legacy"] != "unknown" {
+		t.Errorf("list platforms = %v, want router=openwrt legacy=unknown", seen)
 	}
 }

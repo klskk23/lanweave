@@ -15,7 +15,7 @@ zone 在服务端落地为 nftables set，是 forward 链上的允许规则。
 非目标：
 - 不做 web 端
 - 不做 P2P 直连 / NAT 穿透（所有流量都过中转）
-- 不做 site-to-site
+- ~~不做 site-to-site~~ → 自 030 起支持**单向子网宣告**（合成段映射）：具备地址翻译能力的路由器型节点（platform=openwrt）可把背后 LAN 宣告进 zone，服务端从专用合成段池分配全服唯一等长合成段，成员经合成地址单向访问；**LAN 侧主动连接成员为永久非目标**（回程仅靠 conntrack）。真实网段允许跨节点任意重叠（隧道内只出现合成段）。
 - v1 不支持出公网（split-tunnel 仅 VPN 网段）
 
 ---
@@ -72,6 +72,12 @@ zone 在服务端落地为 nftables set，是 forward 链上的允许规则。
 - 删除 node：IP 立即释放，下一个新 node 复用之。
 - SQLite 写锁串行天然消解并发竞争。
 - 池耗尽：返回 API 错误，admin 可扩 TOML 池后重启。
+
+### 3.3b 合成段池（子网宣告，030）
+- 可选 TOML 段 `[announce] pool`（单个 IPv4 CIDR，建议 CGNAT 内不与 VPN 池冲突的子段，如 `100.100.0.0/16`）；缺省 = 宣告功能停用。
+- 每条宣告 =（节点, 真实子网）→ 等长合成块，事务内 first-fit 自然对齐分配，可挂接多个 zone、最后挂接消失即回收复用。
+- 服务端为合成池安装一条指向 wg 接口的内核路由（VPN 池靠接口地址隐式路由，合成池没有接口地址）；peer 的 AllowedIPs = 节点 /32 ∪ 其全部合成块。
+- nftables：每 zone 第二个 interval set `zone_<id>_routes` + 规则「zone 成员 → 本 zone 合成段 accept」；forward 链头一条全局 `ct state established,related accept` 承载回程（这也使既有成员互通的回包改走 conntrack 快路径，行为等价）。
 
 ### 3.4 流量策略（split-tunnel）
 - 客户端 `AllowedIPs = 100.127.0.0/16` —— 仅 VPN 网段走隧道。
@@ -425,6 +431,9 @@ max_owned_zones_per_user = 10   # 同上，仅统计本人创建（拥有）的 
 | TOFU 信任自签 / 内网证书（feature 018 取代 017 会话级 opt-in） | 首次连接证书过不了系统 CA 时弹窗、显式信任、按 server 持久化叶证书 SHA-256 指纹；验证=指纹或系统 CA；证书变更弹更重警告并阻断、需显式接受；中性「已信任」项于 overflow 菜单（feature 022 改） |
 | 客户端主机防火墙入站放行（feature 018，默认关、Windows-only） | 用户显式开启 Hero 卡片内 Switch 且隧道已连接才装具名规则 `lanweave-vpn-inbound`（仅 `remoteip=100.127.0.0/16`、`profile=any`）；开启即让同网段 peer 触达本机所有本地服务（无二次确认，开关旁 CIDR 副标题标识范围）；断开 / 取消 / 登出 / 退出即删，启动清扫孤儿规则 |
 | 服务端明文 HTTP 监听（`tls=false`，feature 021） | 仅显式 `tls=false` 才明文；缺省/`tls=true` 仍 HTTPS 且缺证书硬失败（绝不静默降级）；明文绑定非回环地址启动告警；须置于 TLS 终止反代之后、勿暴露明文监听公网；客户端仍连反代 `https://`、数据面 WireGuard 不变 |
+| 节点 platform 为客户端自报（feature 030） | 谎报 `openwrt` 可越过宣告能力门禁，但后果限于「宣告了自己兜不住的网段、本 zone 内不通」——隔离仍由 nftables 按合成段管控，不产生越权访问 |
+| 宣告端 MASQUERADE 抹掉真实访问源（feature 030/032） | 目标 LAN 内主机只见路由器 LAN IP，无法审计是哪个 zone 成员访问；接受（NAT 方案固有），zone 准入密码即信任边界 |
+| 宣告内容的社工风险（feature 030） | 成员可声称任意内网内容（"我的 NAS"）诱导同 zone 成员访问其控制的服务；zone 全透明互信模型下接受，准入密码即边界 |
 | API 文档页默认开启、无鉴权（`api_docs`，feature 029） | `/api/docs/` 暴露的仅是 **API 形状**（OpenAPI 文档 + Swagger UI，全静态嵌入，不含任何用户数据 / 机密，示例值全虚构且有测试钳制）；运维可显式 `api_docs = false` 关闭，关闭后 docs 路径与不存在的路径逐字节同 404、不可探测；docs 路径与业务 API 同受全局限流 |
 | 服务进程 root 运行                       | systemd 用 CapabilityBoundingSet 缩小      |
 | 发布产物未签名（Windows installer / .deb） | 发布说明提示 SmartScreen「更多信息→仍要运行」；附 `SHA256SUMS` 供完整性校验 |

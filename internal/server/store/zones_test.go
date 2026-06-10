@@ -14,7 +14,7 @@ import (
 func seedNode(t *testing.T, st *store.Store, userID int64, name string) *store.Node {
 	t.Helper()
 	first, last := poolBounds(t)
-	n, err := st.Nodes().Create(context.Background(), userID, name, freshPubKey(t), first, last, 0)
+	n, err := st.Nodes().Create(context.Background(), userID, name, freshPubKey(t), "unknown", first, last, 0)
 	if err != nil {
 		t.Fatalf("seed node: %v", err)
 	}

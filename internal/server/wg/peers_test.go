@@ -134,3 +134,81 @@ func findPeer(peers []wgtypes.Peer, pub wgtypes.Key) *wgtypes.Peer {
 	}
 	return nil
 }
+
+// TestSetPeerRoutes (privileged) proves AllowedIPs is a full idempotent swap:
+// node /32 plus announced synthetic CIDRs, shrinking back when routes go away.
+func TestSetPeerRoutes(t *testing.T) {
+	testutil.RequireNetAdmin(t)
+	name := uniqueIfaceName(t)
+	serverKey, _ := wgtypes.GeneratePrivateKey()
+	srv, err := wg.EnsureInterface(testWGConfig(name), serverKey, quietLog())
+	if err != nil {
+		t.Fatalf("ensure interface: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = srv.Close()
+		if l, e := netlink.LinkByName(name); e == nil {
+			_ = netlink.LinkDel(l)
+		}
+	})
+	wgc, err := wgctrl.New()
+	if err != nil {
+		t.Fatalf("wgctrl: %v", err)
+	}
+	defer wgc.Close()
+
+	peerKey, _ := wgtypes.GeneratePrivateKey()
+	peerPub := peerKey.PublicKey()
+	ip := netip.MustParseAddr("100.127.0.9")
+
+	allowed := func() map[string]bool {
+		dev, derr := wgc.Device(name)
+		if derr != nil {
+			t.Fatalf("device: %v", derr)
+		}
+		p := findPeer(dev.Peers, peerPub)
+		if p == nil {
+			t.Fatal("peer missing")
+		}
+		out := map[string]bool{}
+		for _, a := range p.AllowedIPs {
+			out[a.String()] = true
+		}
+		return out
+	}
+
+	routes := []netip.Prefix{
+		netip.MustParsePrefix("100.100.1.0/24"),
+		netip.MustParsePrefix("100.100.2.0/23"),
+	}
+	if err := srv.SetPeerRoutes(peerPub.String(), ip, routes); err != nil {
+		t.Fatalf("set routes: %v", err)
+	}
+	got := allowed()
+	for _, want := range []string{"100.127.0.9/32", "100.100.1.0/24", "100.100.2.0/23"} {
+		if !got[want] {
+			t.Errorf("allowed ips missing %s (got %v)", want, got)
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("allowed ips count = %d, want 3", len(got))
+	}
+
+	// Shrink back to just the /32 — the swap must drop stale routes.
+	if err := srv.SetPeerRoutes(peerPub.String(), ip, nil); err != nil {
+		t.Fatalf("clear routes: %v", err)
+	}
+	got = allowed()
+	if len(got) != 1 || !got["100.127.0.9/32"] {
+		t.Errorf("after clear, allowed ips = %v, want only the /32", got)
+	}
+
+	// ReplacePeers carries routes for the startup rebuild path.
+	if err := srv.ReplacePeers([]wg.PeerConfig{{PublicKey: peerPub.String(), IP: ip, Routes: routes[:1]}}); err != nil {
+		t.Fatalf("replace peers: %v", err)
+	}
+	got = allowed()
+	if len(got) != 2 || !got["100.100.1.0/24"] {
+		t.Errorf("after replace, allowed ips = %v, want /32 + 100.100.1.0/24", got)
+	}
+}

@@ -79,13 +79,14 @@ func assertCleanTable(t *testing.T, table string) {
 		t.Errorf("forward chain policy = %v, want drop", fwd.Policy)
 	}
 
-	// No rules, no sets.
+	// Baseline skeleton: exactly the one ct established/related rule (feature 030
+	// return path), no zone rules, no sets.
 	rules, err := conn.GetRules(found, fwd)
 	if err != nil {
 		t.Fatalf("get rules: %v", err)
 	}
-	if len(rules) != 0 {
-		t.Errorf("expected 0 rules, got %d", len(rules))
+	if len(rules) != 1 {
+		t.Errorf("expected exactly the ct baseline rule, got %d rules", len(rules))
 	}
 	sets, err := conn.GetSets(found)
 	if err != nil {

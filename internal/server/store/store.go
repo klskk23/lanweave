@@ -22,7 +22,14 @@ type Store struct {
 // Open opens (or creates) the SQLite database at dbPath with WAL journaling,
 // a busy timeout, and foreign keys enabled.
 func Open(dbPath string) (*Store, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)", dbPath)
+	// _txlock=immediate makes every BeginTx take the writer lock up front, so
+	// concurrent write transactions queue on busy_timeout instead of failing
+	// SQLITE_BUSY at the deferred read→write upgrade (announcement allocation
+	// runs read-then-insert in one transaction and hits exactly that). The flip
+	// side: BeginTx is for WRITE transactions only — a pure read wrapped in
+	// BeginTx would needlessly serialize all writers; plain Query/QueryRow
+	// already give consistent snapshots.
+	dsn := fmt.Sprintf("file:%s?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)", dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", dbPath, err)

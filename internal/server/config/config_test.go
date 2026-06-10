@@ -464,3 +464,57 @@ func TestAPIDocsEnabledThreeState(t *testing.T) {
 		})
 	}
 }
+
+// TestAnnouncePoolValidation proves the announce pool is optional (empty = feature
+// off), must be a valid IPv4 CIDR when set, and must not overlap the VPN pool.
+func TestAnnouncePoolValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pool    string
+		wantErr bool
+	}{
+		{"empty pool is valid (feature off)", "", false},
+		{"valid CGNAT pool", "100.100.0.0/16", false},
+		{"not a CIDR", "not-a-cidr", true},
+		{"IPv6 pool rejected", "fd00::/64", true},
+		{"overlaps vpn pool", "100.127.0.0/24", true},
+		{"contains vpn pool", "100.64.0.0/10", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := config.Load(writeTLSToggleConfig(t, ""))
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			c.Announce.Pool = tc.pool
+			err = c.Validate()
+			if tc.wantErr && (err == nil || !strings.Contains(err.Error(), "announce.pool")) {
+				t.Errorf("Validate() = %v, want announce.pool error", err)
+			}
+			if !tc.wantErr && err != nil && strings.Contains(err.Error(), "announce.pool") {
+				t.Errorf("Validate() unexpectedly rejected pool: %v", err)
+			}
+		})
+	}
+}
+
+// TestAnnouncedSubnetsLimitThreeState mirrors the 023 limits pattern for the new
+// announcement quota: unset → 10, explicit 0 → unlimited, negative → invalid.
+func TestAnnouncedSubnetsLimitThreeState(t *testing.T) {
+	c, err := config.Load(writeTLSToggleConfig(t, ""))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.Limits.MaxAnnouncedSubnetsPerUser == nil || *c.Limits.MaxAnnouncedSubnetsPerUser != 10 {
+		t.Errorf("unset max_announced_subnets_per_user = %v, want default 10", c.Limits.MaxAnnouncedSubnetsPerUser)
+	}
+	zero := 0
+	c.Limits.MaxAnnouncedSubnetsPerUser = &zero
+	if err := c.Validate(); err != nil && strings.Contains(err.Error(), "max_announced_subnets_per_user") {
+		t.Errorf("explicit 0 must be valid (unlimited): %v", err)
+	}
+	neg := -1
+	c.Limits.MaxAnnouncedSubnetsPerUser = &neg
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "max_announced_subnets_per_user") {
+		t.Errorf("negative limit must fail validation, got %v", err)
+	}
+}
