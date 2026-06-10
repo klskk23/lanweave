@@ -42,6 +42,15 @@ type Config struct {
 	Auth      AuthConfig      `toml:"auth"`
 	Admin     AdminConfig     `toml:"admin"`
 	Limits    LimitsConfig    `toml:"limits"`
+	Announce  AnnounceConfig  `toml:"announce"`
+}
+
+// AnnounceConfig configures the subnet-announcement feature (slice 030). Pool is
+// the dedicated IPv4 CIDR synthetic blocks are carved from. It has NO default:
+// empty/absent means the feature is disabled (announce writes return an explicit
+// error), so existing deployments are unaffected until an operator plans a pool.
+type AnnounceConfig struct {
+	Pool string `toml:"pool"`
 }
 
 // defaultPerUserLimit is the cap applied to a per-user limit whose key is absent
@@ -53,8 +62,9 @@ const defaultPerUserLimit = 10
 // unlimited; a negative value is rejected by Validate. The pointer keeps "unset"
 // distinct from "explicit 0" so 0 can carry the "unlimited" meaning.
 type LimitsConfig struct {
-	MaxDevicesPerUser    *int `toml:"max_devices_per_user"`
-	MaxOwnedZonesPerUser *int `toml:"max_owned_zones_per_user"`
+	MaxDevicesPerUser          *int `toml:"max_devices_per_user"`
+	MaxOwnedZonesPerUser       *int `toml:"max_owned_zones_per_user"`
+	MaxAnnouncedSubnetsPerUser *int `toml:"max_announced_subnets_per_user"`
 }
 
 type ServerConfig struct {
@@ -209,6 +219,10 @@ func (c *Config) applyDefaults() {
 		v := defaultPerUserLimit
 		c.Limits.MaxOwnedZonesPerUser = &v
 	}
+	if c.Limits.MaxAnnouncedSubnetsPerUser == nil {
+		v := defaultPerUserLimit
+		c.Limits.MaxAnnouncedSubnetsPerUser = &v
+	}
 }
 
 // Validate collects every configuration problem and returns them joined, so the
@@ -309,6 +323,26 @@ func (c *Config) Validate() error {
 	}
 	if v := c.Limits.MaxOwnedZonesPerUser; v != nil && *v < 0 {
 		errs = append(errs, errors.New("limits.max_owned_zones_per_user must be >= 0 (0 = unlimited)"))
+	}
+	if v := c.Limits.MaxAnnouncedSubnetsPerUser; v != nil && *v < 0 {
+		errs = append(errs, errors.New("limits.max_announced_subnets_per_user must be >= 0 (0 = unlimited)"))
+	}
+
+	// announce.pool has no default: empty means the announcement feature is off.
+	// A set pool must be a valid IPv4 CIDR and must not overlap the VPN pool —
+	// synthetic blocks live in tunnel routing alongside node /32s, so an overlap
+	// would let announcements shadow member addresses.
+	if c.Announce.Pool != "" {
+		_, poolNet, err := net.ParseCIDR(c.Announce.Pool)
+		if err != nil || poolNet.IP.To4() == nil {
+			errs = append(errs, fmt.Errorf("announce.pool %q is not a valid IPv4 CIDR", c.Announce.Pool))
+		} else if c.WireGuard.Network != "" {
+			if _, vpnNet, verr := net.ParseCIDR(c.WireGuard.Network); verr == nil {
+				if poolNet.Contains(vpnNet.IP) || vpnNet.Contains(poolNet.IP) {
+					errs = append(errs, fmt.Errorf("announce.pool %q overlaps wireguard.network %q", c.Announce.Pool, c.WireGuard.Network))
+				}
+			}
+		}
 	}
 
 	return errors.Join(errs...)

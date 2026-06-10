@@ -108,7 +108,7 @@ func (h *zoneHarness) seedNode(userID int64, name string) *store.Node {
 	h.t.Helper()
 	first, last, _ := ipam.PoolRange("100.127.0.0/16")
 	k := nodePubKey(h.t)
-	n, err := h.store.Nodes().Create(context.Background(), userID, name, k, first, last, 0)
+	n, err := h.store.Nodes().Create(context.Background(), userID, name, k, "unknown", first, last, 0)
 	if err != nil {
 		h.t.Fatalf("seed node: %v", err)
 	}

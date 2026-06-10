@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,11 @@ import (
 	"lanweave/internal/server/store"
 	"lanweave/pkg/protocol"
 )
+
+// platformPattern bounds the self-reported platform identifier. The value is
+// informational plus a capability hint; the strict charset keeps it safe to
+// display and to gate on.
+var platformPattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 
 // statusProvider reports per-node online state derived from the live tunnel.
 // Satisfied by *status.Tracker; an interface keeps the API package independent of
@@ -43,6 +49,16 @@ func (h *handlers) registerNode(w http.ResponseWriter, r *http.Request) {
 		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", "Invalid WireGuard public key.")
 		return
 	}
+	// Platform is self-reported; empty keeps pre-030 clients registering
+	// unchanged. Announcement capability is derived from it server-side.
+	platform := req.Platform
+	if platform == "" {
+		platform = "unknown"
+	}
+	if !platformPattern.MatchString(platform) {
+		protocol.WriteJSONError(w, http.StatusBadRequest, "validation_error", "Platform must be 1-32 lowercase letters, digits or dashes.")
+		return
+	}
 
 	first, last, err := ipam.PoolRange(h.wgConfig.Network)
 	if err != nil {
@@ -56,7 +72,7 @@ func (h *handlers) registerNode(w http.ResponseWriter, r *http.Request) {
 	if id.IsAdmin {
 		maxDevices = 0
 	}
-	node, err := h.store.Nodes().Create(r.Context(), id.UserID, name, req.WGPubKey, first, last, maxDevices)
+	node, err := h.store.Nodes().Create(r.Context(), id.UserID, name, req.WGPubKey, platform, first, last, maxDevices)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrNodeNameTaken):
@@ -83,7 +99,7 @@ func (h *handlers) registerNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, protocol.NodeResponse{ID: node.ID, Name: node.Name, IP: node.IP.String()})
+	writeJSON(w, http.StatusCreated, protocol.NodeResponse{ID: node.ID, Name: node.Name, IP: node.IP.String(), Platform: node.Platform})
 }
 
 // listNodes returns the caller's own nodes.
@@ -106,6 +122,7 @@ func (h *handlers) listNodes(w http.ResponseWriter, r *http.Request) {
 			IP:        n.IP.String(),
 			CreatedAt: n.CreatedAt.Format(time.RFC3339),
 			Online:    h.status.Online(n.PubKey),
+			Platform:  n.Platform,
 		}
 		if ts, ok := h.status.LastHandshake(n.PubKey); ok {
 			item.LastHandshake = ts.Format(time.RFC3339)
@@ -143,6 +160,13 @@ func (h *handlers) deleteNode(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, err)
 		return
 	}
+	// Snapshot the node's announcement attachments before the delete: the rows
+	// cascade away with the node, but the zone routes sets do not.
+	attachments, err := h.store.Announcements().AttachmentsForNode(r.Context(), nodeID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
 
 	if _, err := h.store.Nodes().DeleteOwned(r.Context(), id.UserID, nodeID); err != nil {
 		if errors.Is(err, store.ErrNodeNotFound) {
@@ -163,6 +187,11 @@ func (h *handlers) deleteNode(w http.ResponseWriter, r *http.Request) {
 	for _, zid := range zoneIDs {
 		if err := h.netfw.RemoveMember(zid, node.IP); err != nil {
 			h.log.Error("failed to remove set element for deleted node", "node_id", nodeID, "zone_id", zid, "error", err.Error())
+		}
+	}
+	for _, att := range attachments {
+		if err := h.netfw.RemoveZoneRoute(att.ZoneID, att.Synthetic); err != nil {
+			h.log.Error("failed to remove zone route for deleted node", "node_id", nodeID, "zone_id", att.ZoneID, "error", err.Error())
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)

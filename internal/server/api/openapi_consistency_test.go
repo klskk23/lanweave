@@ -21,6 +21,9 @@ var knownErrorCodes = map[string]bool{
 	"node_name_taken": true, "zone_name_taken": true, "invalid_zone_or_password": true,
 	"device_limit_reached": true, "zone_limit_reached": true, "pool_exhausted": true,
 	"last_admin": true, "cannot_delete_self": true,
+	// Subnet announcements (feature 030).
+	"platform_unsupported": true, "announce_disabled": true, "subnet_invalid": true,
+	"subnet_overlap": true, "announce_limit_reached": true, "synthetic_pool_exhausted": true,
 }
 
 // routeOperations derives the documented-comparable (METHOD path) set from the

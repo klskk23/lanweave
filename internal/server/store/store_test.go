@@ -105,3 +105,27 @@ func TestCreateAdminDuplicate(t *testing.T) {
 		t.Fatalf("expected ErrUserExists, got %v", err)
 	}
 }
+
+// TestNodePlatformColumn verifies migration 0007: a node row inserted without a
+// platform (pre-030 shape) reads back the backfilled default "unknown".
+func TestNodePlatformColumn(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	admin, err := st.Users().CreateAdmin(ctx, "admin", "hash")
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	if _, err := st.DB().ExecContext(ctx,
+		`INSERT INTO nodes (user_id, name, wg_pubkey, ip, created_at) VALUES (?, ?, ?, ?, ?)`,
+		admin.ID, "legacy", "legacy-key", 1684830210, "2026-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("insert legacy node: %v", err)
+	}
+	var platform string
+	if err := st.DB().QueryRowContext(ctx,
+		`SELECT platform FROM nodes WHERE name = 'legacy'`).Scan(&platform); err != nil {
+		t.Fatalf("select platform: %v", err)
+	}
+	if platform != "unknown" {
+		t.Errorf("platform = %q, want backfilled default 'unknown'", platform)
+	}
+}

@@ -217,6 +217,7 @@ func (h *handlers) leaveZone(w http.ResponseWriter, r *http.Request) {
 	if err := h.netfw.RemoveMember(zone.ID, node.IP); err != nil {
 		h.log.Error("failed to remove set element on leave", "zone_id", zone.ID, "node_id", node.ID, "error", err.Error())
 	}
+	h.cascadeNodeZoneAnnouncements(r.Context(), node, zone.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -374,6 +375,7 @@ func (h *handlers) kickMember(w http.ResponseWriter, r *http.Request) {
 	if err := h.netfw.RemoveMember(zone.ID, node.IP); err != nil {
 		h.log.Error("failed to remove set element on kick", "zone_id", zone.ID, "node_id", node.ID, "error", err.Error())
 	}
+	h.cascadeNodeZoneAnnouncements(r.Context(), node, zone.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -389,13 +391,78 @@ func (h *handlers) deleteZone(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Detach the zone's announcements first (reclaiming bodies whose last
+	// attachment this was — including other users' announcements made into this
+	// zone alone, whose synthetic blocks would otherwise leak forever).
+	dets, err := h.store.Announcements().DetachAllForZone(r.Context(), zone.ID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
 	if err := h.store.Zones().Delete(r.Context(), zone.ID); err != nil {
 		h.serverError(w, err)
 		return
 	}
 	// DB is authoritative; destroy the set + rule best-effort (startup reconciles).
+	// The routes set dies with the zone; only reclaimed announcements need their
+	// peers' AllowedIPs recomputed.
 	if err := h.netfw.DeleteZone(zone.ID); err != nil {
 		h.log.Error("failed to delete zone nftables state", "zone_id", zone.ID, "error", err.Error())
 	}
+	h.recomputeReclaimedPeers(r.Context(), dets)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// cascadeNodeZoneAnnouncements removes the node's announcement attachments to a
+// zone it just left (leave/kick), shrinking the zone routes set and — when a
+// last attachment was reclaimed — the peer's AllowedIPs. Best-effort after the
+// authoritative DB change (startup rebuild reconciles any gap).
+func (h *handlers) cascadeNodeZoneAnnouncements(ctx context.Context, node *store.Node, zoneID int64) {
+	dets, err := h.store.Announcements().DetachAllForNodeZone(ctx, node.ID, zoneID)
+	if err != nil {
+		h.log.Error("failed to detach announcements on zone exit", "zone_id", zoneID, "node_id", node.ID, "error", err.Error())
+		return
+	}
+	reclaimed := false
+	for _, det := range dets {
+		if err := h.netfw.RemoveZoneRoute(zoneID, det.Synthetic); err != nil {
+			h.log.Error("failed to remove zone route on zone exit", "zone_id", zoneID, "error", err.Error())
+		}
+		reclaimed = reclaimed || det.Reclaimed
+	}
+	if reclaimed {
+		routes, err := h.store.Announcements().RoutesForNode(ctx, node.ID)
+		if err != nil {
+			h.log.Error("failed to recompute routes on zone exit", "node_id", node.ID, "error", err.Error())
+			return
+		}
+		if err := h.wg.SetPeerRoutes(node.PubKey, node.IP, routes); err != nil {
+			h.log.Error("failed to shrink peer routes on zone exit", "node_id", node.ID, "error", err.Error())
+		}
+	}
+}
+
+// recomputeReclaimedPeers recomputes AllowedIPs for every node that lost an
+// announcement body in a zone-wide detach (zone deletion). Best-effort.
+func (h *handlers) recomputeReclaimedPeers(ctx context.Context, dets []store.ZoneDetachment) {
+	seen := map[int64]bool{}
+	for _, det := range dets {
+		if !det.Reclaimed || seen[det.NodeID] {
+			continue
+		}
+		seen[det.NodeID] = true
+		node, err := h.store.Nodes().GetByID(ctx, det.NodeID)
+		if err != nil {
+			h.log.Error("failed to load node for route recompute", "node_id", det.NodeID, "error", err.Error())
+			continue
+		}
+		routes, err := h.store.Announcements().RoutesForNode(ctx, det.NodeID)
+		if err != nil {
+			h.log.Error("failed to recompute routes", "node_id", det.NodeID, "error", err.Error())
+			continue
+		}
+		if err := h.wg.SetPeerRoutes(node.PubKey, node.IP, routes); err != nil {
+			h.log.Error("failed to update peer routes", "node_id", det.NodeID, "error", err.Error())
+		}
+	}
 }

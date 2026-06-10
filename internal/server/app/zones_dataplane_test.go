@@ -41,8 +41,8 @@ func TestRebuildZoneRules(t *testing.T) {
 	first, last, _ := ipam.PoolRange("100.127.0.0/16")
 	k1, _ := wgtypes.GeneratePrivateKey()
 	k2, _ := wgtypes.GeneratePrivateKey()
-	n1, _ := st.Nodes().Create(ctx, owner.ID, "n1", k1.PublicKey().String(), first, last, 0)
-	n2, _ := st.Nodes().Create(ctx, owner.ID, "n2", k2.PublicKey().String(), first, last, 0)
+	n1, _ := st.Nodes().Create(ctx, owner.ID, "n1", k1.PublicKey().String(), "unknown", first, last, 0)
+	n2, _ := st.Nodes().Create(ctx, owner.ID, "n2", k2.PublicKey().String(), "unknown", first, last, 0)
 	z, _ := st.Zones().Create(ctx, owner.ID, "z", "hash", 0)
 	_ = st.Zones().Join(ctx, z.ID, n1.ID)
 	_ = st.Zones().Join(ctx, z.ID, n2.ID)
@@ -59,7 +59,7 @@ func TestRebuildZoneRules(t *testing.T) {
 	})
 
 	// Rebuild from the DB → the zone set contains both members (FR-017).
-	if err := rebuildZoneRules(ctx, st.Zones(), mgr, log); err != nil {
+	if err := rebuildZoneRules(ctx, st.Zones(), st.Announcements(), mgr, log); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 	if !setContains(t, table, z.ID, n1.IP) || !setContains(t, table, z.ID, n2.IP) {
@@ -71,7 +71,7 @@ func TestRebuildZoneRules(t *testing.T) {
 	if err := st.Zones().Leave(ctx, z.ID, n1.ID); err != nil {
 		t.Fatalf("leave: %v", err)
 	}
-	if err := rebuildZoneRules(ctx, st.Zones(), mgr, log); err != nil {
+	if err := rebuildZoneRules(ctx, st.Zones(), st.Announcements(), mgr, log); err != nil {
 		t.Fatalf("rebuild after leave: %v", err)
 	}
 	if setContains(t, table, z.ID, n1.IP) {
@@ -123,9 +123,9 @@ func TestOwnerOpsRebuild(t *testing.T) {
 	k1, _ := wgtypes.GeneratePrivateKey()
 	k2, _ := wgtypes.GeneratePrivateKey()
 	k3, _ := wgtypes.GeneratePrivateKey()
-	n1, _ := st.Nodes().Create(ctx, owner.ID, "n1", k1.PublicKey().String(), first, last, 0)
-	n2, _ := st.Nodes().Create(ctx, owner.ID, "n2", k2.PublicKey().String(), first, last, 0)
-	n3, _ := st.Nodes().Create(ctx, owner.ID, "n3", k3.PublicKey().String(), first, last, 0)
+	n1, _ := st.Nodes().Create(ctx, owner.ID, "n1", k1.PublicKey().String(), "unknown", first, last, 0)
+	n2, _ := st.Nodes().Create(ctx, owner.ID, "n2", k2.PublicKey().String(), "unknown", first, last, 0)
+	n3, _ := st.Nodes().Create(ctx, owner.ID, "n3", k3.PublicKey().String(), "unknown", first, last, 0)
 	zKeep, _ := st.Zones().Create(ctx, owner.ID, "keep", "hash", 0)
 	zDel, _ := st.Zones().Create(ctx, owner.ID, "del", "hash", 0)
 	_ = st.Zones().Join(ctx, zKeep.ID, n1.ID)
@@ -148,7 +148,7 @@ func TestOwnerOpsRebuild(t *testing.T) {
 	_ = st.Zones().Delete(ctx, zDel.ID)
 
 	// Rebuild from the DB → rules must match: zKeep has n1 not n2, zDel is gone.
-	if err := rebuildZoneRules(ctx, st.Zones(), mgr, log); err != nil {
+	if err := rebuildZoneRules(ctx, st.Zones(), st.Announcements(), mgr, log); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 	if !setContains(t, table, zKeep.ID, n1.IP) {

@@ -31,6 +31,9 @@ type Node struct {
 	PubKey    string
 	IP        netip.Addr
 	CreatedAt time.Time
+	// Platform is the client's self-reported platform ("unknown" for pre-030
+	// rows); announcement capability is derived from it (only "openwrt" today).
+	Platform string
 }
 
 // NodeRepo provides access to the nodes table.
@@ -47,7 +50,7 @@ func (s *Store) Nodes() *NodeRepo { return &NodeRepo{db: s.db} }
 // maxDevices caps how many nodes the user may own: when > 0 the count check is folded
 // into the insert so it is atomic under SQLite's writer lock (a user at the cap yields
 // ErrDeviceLimitReached); maxDevices <= 0 means unlimited (admin or configured 0).
-func (r *NodeRepo) Create(ctx context.Context, userID int64, name, pubKey string, first, last uint32, maxDevices int) (*Node, error) {
+func (r *NodeRepo) Create(ctx context.Context, userID int64, name, pubKey, platform string, first, last uint32, maxDevices int) (*Node, error) {
 	now := time.Now().UTC().Truncate(time.Second)
 	for range maxAllocRetries {
 		ipVal, ok, err := r.lowestFree(ctx, first, last)
@@ -57,7 +60,7 @@ func (r *NodeRepo) Create(ctx context.Context, userID int64, name, pubKey string
 		if !ok {
 			return nil, ErrPoolExhausted
 		}
-		res, err := r.insertNode(ctx, userID, name, pubKey, ipVal, now, maxDevices)
+		res, err := r.insertNode(ctx, userID, name, pubKey, platform, ipVal, now, maxDevices)
 		if err != nil {
 			switch {
 			case isUniqueViolationOn(err, "nodes.ip"):
@@ -85,6 +88,7 @@ func (r *NodeRepo) Create(ctx context.Context, userID int64, name, pubKey string
 			PubKey:    pubKey,
 			IP:        ipam.Uint32ToAddr(ipVal),
 			CreatedAt: now,
+			Platform:  platform,
 		}, nil
 	}
 	return nil, fmt.Errorf("allocate address: exhausted %d retries under contention", maxAllocRetries)
@@ -96,17 +100,17 @@ func (r *NodeRepo) Create(ctx context.Context, userID int64, name, pubKey string
 // <= 0 (unlimited / admin) runs the plain unconditional insert. A UNIQUE violation
 // still surfaces as an error in both forms, so the caller's retry/typed-error handling
 // is unchanged.
-func (r *NodeRepo) insertNode(ctx context.Context, userID int64, name, pubKey string, ipVal uint32, now time.Time, maxDevices int) (sql.Result, error) {
+func (r *NodeRepo) insertNode(ctx context.Context, userID int64, name, pubKey, platform string, ipVal uint32, now time.Time, maxDevices int) (sql.Result, error) {
 	ts := now.Format(time.RFC3339)
 	if maxDevices > 0 {
 		const q = `
-INSERT INTO nodes (user_id, name, wg_pubkey, ip, created_at)
-SELECT ?, ?, ?, ?, ?
+INSERT INTO nodes (user_id, name, wg_pubkey, ip, created_at, platform)
+SELECT ?, ?, ?, ?, ?, ?
 WHERE (SELECT COUNT(*) FROM nodes WHERE user_id = ?) < ?`
-		return r.db.ExecContext(ctx, q, userID, name, pubKey, ipVal, ts, userID, maxDevices)
+		return r.db.ExecContext(ctx, q, userID, name, pubKey, ipVal, ts, platform, userID, maxDevices)
 	}
-	const q = `INSERT INTO nodes (user_id, name, wg_pubkey, ip, created_at) VALUES (?, ?, ?, ?, ?)`
-	return r.db.ExecContext(ctx, q, userID, name, pubKey, ipVal, ts)
+	const q = `INSERT INTO nodes (user_id, name, wg_pubkey, ip, created_at, platform) VALUES (?, ?, ?, ?, ?, ?)`
+	return r.db.ExecContext(ctx, q, userID, name, pubKey, ipVal, ts, platform)
 }
 
 // lowestFree returns the smallest free address (uint32) in [first, last], or ok=false
@@ -133,14 +137,14 @@ ORDER BY c LIMIT 1`
 // GetByID returns any node by id, regardless of owner (used to resolve a kicked
 // member's address — the owner's authority is over the zone, not the node).
 func (r *NodeRepo) GetByID(ctx context.Context, nodeID int64) (*Node, error) {
-	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at FROM nodes WHERE id = ?`
+	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at, platform FROM nodes WHERE id = ?`
 	var (
 		n         Node
 		ipVal     int64
 		createdAt string
 	)
 	err := r.db.QueryRowContext(ctx, q, nodeID).
-		Scan(&n.ID, &n.UserID, &n.Name, &n.PubKey, &ipVal, &createdAt)
+		Scan(&n.ID, &n.UserID, &n.Name, &n.PubKey, &ipVal, &createdAt, &n.Platform)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNodeNotFound
 	}
@@ -158,14 +162,14 @@ func (r *NodeRepo) GetByID(ctx context.Context, nodeID int64) (*Node, error) {
 
 // GetOwned returns the node only if it is owned by userID, else ErrNodeNotFound.
 func (r *NodeRepo) GetOwned(ctx context.Context, userID, nodeID int64) (*Node, error) {
-	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at FROM nodes WHERE id = ? AND user_id = ?`
+	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at, platform FROM nodes WHERE id = ? AND user_id = ?`
 	var (
 		n         Node
 		ipVal     int64
 		createdAt string
 	)
 	err := r.db.QueryRowContext(ctx, q, nodeID, userID).
-		Scan(&n.ID, &n.UserID, &n.Name, &n.PubKey, &ipVal, &createdAt)
+		Scan(&n.ID, &n.UserID, &n.Name, &n.PubKey, &ipVal, &createdAt, &n.Platform)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNodeNotFound
 	}
@@ -183,7 +187,7 @@ func (r *NodeRepo) GetOwned(ctx context.Context, userID, nodeID int64) (*Node, e
 
 // ListByUser returns the user's nodes, newest first.
 func (r *NodeRepo) ListByUser(ctx context.Context, userID int64) ([]Node, error) {
-	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at FROM nodes WHERE user_id = ? ORDER BY id DESC`
+	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at, platform FROM nodes WHERE user_id = ? ORDER BY id DESC`
 	rows, err := r.db.QueryContext(ctx, q, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
@@ -194,7 +198,7 @@ func (r *NodeRepo) ListByUser(ctx context.Context, userID int64) ([]Node, error)
 
 // AllForPeers returns every node (for the startup peer rebuild).
 func (r *NodeRepo) AllForPeers(ctx context.Context) ([]Node, error) {
-	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at FROM nodes ORDER BY id`
+	const q = `SELECT id, user_id, name, wg_pubkey, ip, created_at, platform FROM nodes ORDER BY id`
 	rows, err := r.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("list all nodes: %w", err)
@@ -229,7 +233,7 @@ func scanNodes(rows *sql.Rows) ([]Node, error) {
 			ipVal     int64
 			createdAt string
 		)
-		if err := rows.Scan(&n.ID, &n.UserID, &n.Name, &n.PubKey, &ipVal, &createdAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.UserID, &n.Name, &n.PubKey, &ipVal, &createdAt, &n.Platform); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		n.IP = ipam.Uint32ToAddr(uint32(ipVal))

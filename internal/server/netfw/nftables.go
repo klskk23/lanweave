@@ -6,8 +6,11 @@ import (
 	"net/netip"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
 	"golang.org/x/sys/unix"
+
+	"lanweave/internal/server/ipam"
 )
 
 // Manager owns the relay's dedicated nftables isolation table (family inet).
@@ -20,13 +23,25 @@ func NewManager(table string) *Manager {
 	return &Manager{table: table}
 }
 
-// ZoneState is one zone's id and member addresses, the desired nftables state.
+// ZoneState is one zone's id, member addresses and announced synthetic route
+// CIDRs — the desired nftables state.
 type ZoneState struct {
 	ID        int64
 	MemberIPs []netip.Addr
+	// RouteCIDRs are the synthetic blocks announced into this zone (feature 030):
+	// members may open connections toward them; replies ride conntrack.
+	RouteCIDRs []netip.Prefix
 }
 
-func zoneSetName(id int64) string { return fmt.Sprintf("zone_%d", id) }
+func zoneSetName(id int64) string   { return fmt.Sprintf("zone_%d", id) }
+func routesSetName(id int64) string { return fmt.Sprintf("zone_%d_routes", id) }
+
+// newRoutesSet returns the (empty) interval set holding a zone's announced
+// synthetic CIDRs. Interval sets store ranges, which is how nftables expresses
+// CIDR membership.
+func newRoutesSet(table *nftables.Table, zoneID int64) *nftables.Set {
+	return &nftables.Set{Table: table, Name: routesSetName(zoneID), KeyType: nftables.TypeIPAddr, Interval: true}
+}
 
 // Rebuild brings the isolation table to a deterministic state matching the given
 // zones: the table + a default-drop forward chain, and for each zone a set of
@@ -62,12 +77,26 @@ func (m *Manager) Rebuild(zones []ZoneState, log *slog.Logger) error {
 		Priority: nftables.ChainPriorityFilter,
 		Policy:   &policy,
 	})
+	// Return traffic from announced synthetic subnets rides conntrack: replies
+	// match established/related, while LAN-side initiated flows have no entry and
+	// fall through to the drop policy — the one-way semantics of feature 030.
+	conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: ctEstablishedAcceptExprs()})
 	for _, z := range zones {
 		set := &nftables.Set{Table: table, Name: zoneSetName(z.ID), KeyType: nftables.TypeIPAddr}
 		if err := conn.AddSet(set, ipElements(z.MemberIPs)); err != nil {
 			return fmt.Errorf("add set %s: %w", set.Name, err)
 		}
 		conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: sameZoneAcceptExprs(set)})
+		routes := newRoutesSet(table, z.ID)
+		if err := conn.AddSet(routes, nil); err != nil {
+			return fmt.Errorf("add set %s: %w", routes.Name, err)
+		}
+		for _, p := range z.RouteCIDRs {
+			if err := conn.SetAddElements(routes, rangeElements(p)); err != nil {
+				return fmt.Errorf("add route %s to %s: %w", p, routes.Name, err)
+			}
+		}
+		conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: zoneRouteAcceptExprs(set, routes)})
 	}
 	if err := conn.Flush(); err != nil {
 		return fmt.Errorf("build nftables table %q: %w", m.table, err)
@@ -93,8 +122,51 @@ func (m *Manager) AddZone(zoneID int64) error {
 		return fmt.Errorf("add set for zone %d: %w", zoneID, err)
 	}
 	conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: sameZoneAcceptExprs(set)})
+	routes := newRoutesSet(table, zoneID)
+	if err := conn.AddSet(routes, nil); err != nil {
+		return fmt.Errorf("add routes set for zone %d: %w", zoneID, err)
+	}
+	conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: zoneRouteAcceptExprs(set, routes)})
 	if err := conn.Flush(); err != nil {
 		return fmt.Errorf("add zone %d: %w", zoneID, err)
+	}
+	return nil
+}
+
+// AddZoneRoute adds an announced synthetic CIDR to a zone's routes set.
+func (m *Manager) AddZoneRoute(zoneID int64, prefix netip.Prefix) error {
+	conn, err := nftables.New()
+	if err != nil {
+		return fmt.Errorf("open nftables: %w", err)
+	}
+	set, err := conn.GetSetByName(&nftables.Table{Family: nftables.TableFamilyINet, Name: m.table}, routesSetName(zoneID))
+	if err != nil {
+		return fmt.Errorf("get routes set for zone %d: %w", zoneID, err)
+	}
+	if err := conn.SetAddElements(set, rangeElements(prefix)); err != nil {
+		return fmt.Errorf("add route: %w", err)
+	}
+	if err := conn.Flush(); err != nil {
+		return fmt.Errorf("add route %s to zone %d: %w", prefix, zoneID, err)
+	}
+	return nil
+}
+
+// RemoveZoneRoute removes an announced synthetic CIDR from a zone's routes set.
+func (m *Manager) RemoveZoneRoute(zoneID int64, prefix netip.Prefix) error {
+	conn, err := nftables.New()
+	if err != nil {
+		return fmt.Errorf("open nftables: %w", err)
+	}
+	set, err := conn.GetSetByName(&nftables.Table{Family: nftables.TableFamilyINet, Name: m.table}, routesSetName(zoneID))
+	if err != nil {
+		return fmt.Errorf("get routes set for zone %d: %w", zoneID, err)
+	}
+	if err := conn.SetDeleteElements(set, rangeElements(prefix)); err != nil {
+		return fmt.Errorf("remove route: %w", err)
+	}
+	if err := conn.Flush(); err != nil {
+		return fmt.Errorf("remove route %s from zone %d: %w", prefix, zoneID, err)
 	}
 	return nil
 }
@@ -150,7 +222,7 @@ func (m *Manager) DeleteZone(zoneID int64) error {
 	if err != nil {
 		return err
 	}
-	setName := zoneSetName(zoneID)
+	setNames := []string{zoneSetName(zoneID), routesSetName(zoneID)}
 
 	rules, err := conn.GetRules(table, chain)
 	if err != nil {
@@ -158,11 +230,14 @@ func (m *Manager) DeleteZone(zoneID int64) error {
 	}
 	deletedRule := false
 	for _, rule := range rules {
-		if ruleReferencesSet(rule, setName) {
-			if err := conn.DelRule(rule); err != nil {
-				return fmt.Errorf("delete zone rule: %w", err)
+		for _, setName := range setNames {
+			if ruleReferencesSet(rule, setName) {
+				if err := conn.DelRule(rule); err != nil {
+					return fmt.Errorf("delete zone rule: %w", err)
+				}
+				deletedRule = true
+				break
 			}
-			deletedRule = true
 		}
 	}
 	if deletedRule {
@@ -171,10 +246,12 @@ func (m *Manager) DeleteZone(zoneID int64) error {
 		}
 	}
 
-	if set, err := conn.GetSetByName(table, setName); err == nil {
-		conn.DelSet(set)
-		if err := conn.Flush(); err != nil {
-			return fmt.Errorf("delete set %s: %w", setName, err)
+	for _, setName := range setNames {
+		if set, err := conn.GetSetByName(table, setName); err == nil {
+			conn.DelSet(set)
+			if err := conn.Flush(); err != nil {
+				return fmt.Errorf("delete set %s: %w", setName, err)
+			}
 		}
 	}
 	return nil
@@ -222,5 +299,59 @@ func sameZoneAcceptExprs(set *nftables.Set) []expr.Any {
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4}, // IPv4 daddr
 		&expr.Lookup{SourceRegister: 1, SetName: set.Name, SetID: set.ID},
 		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+// zoneRouteAcceptExprs builds `ip saddr @members ip daddr @routes accept`: zone
+// members may open connections toward the zone's announced synthetic CIDRs. The
+// reverse direction is intentionally absent (one-way semantics, feature 030).
+func zoneRouteAcceptExprs(members, routes *nftables.Set) []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV4}},
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 12, Len: 4}, // IPv4 saddr
+		&expr.Lookup{SourceRegister: 1, SetName: members.Name, SetID: members.ID},
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4}, // IPv4 daddr
+		&expr.Lookup{SourceRegister: 1, SetName: routes.Name, SetID: routes.ID},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+// ctEstablishedAcceptExprs builds `ct state established,related accept` — the
+// return path for member-initiated flows toward announced subnets.
+func ctEstablishedAcceptExprs() []expr.Any {
+	return []expr.Any{
+		&expr.Ct{Register: 1, Key: expr.CtKeySTATE},
+		&expr.Bitwise{
+			SourceRegister: 1,
+			DestRegister:   1,
+			Len:            4,
+			Mask:           binaryutil.NativeEndian.PutUint32(expr.CtStateBitESTABLISHED | expr.CtStateBitRELATED),
+			Xor:            binaryutil.NativeEndian.PutUint32(0),
+		},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{0, 0, 0, 0}},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}
+}
+
+// rangeElements expresses an IPv4 CIDR as interval-set elements: the inclusive
+// start plus the exclusive end marked IntervalEnd, which is how nftables
+// interval sets encode ranges.
+func rangeElements(p netip.Prefix) []nftables.SetElement {
+	b := ipam.BlockFromPrefix(p)
+	start := ipam.Uint32ToAddr(b.Base).As4()
+	endExclusive := uint64(b.Base) + (uint64(1) << (32 - b.PrefixLen))
+	// A block ending at the address-space top would wrap; clamp to the all-ones
+	// address as interval end (exclusive end 2^32 == 0.0.0.0 wrapped, never valid
+	// for our pools but guarded anyway).
+	var end [4]byte
+	if endExclusive > 0xFFFFFFFF {
+		end = [4]byte{0xFF, 0xFF, 0xFF, 0xFF}
+	} else {
+		end = ipam.Uint32ToAddr(uint32(endExclusive)).As4()
+	}
+	return []nftables.SetElement{
+		{Key: start[:]},
+		{Key: end[:], IntervalEnd: true},
 	}
 }

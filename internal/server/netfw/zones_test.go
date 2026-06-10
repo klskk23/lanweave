@@ -41,10 +41,10 @@ func TestZoneSetsAndRules(t *testing.T) {
 	if got := setElementCount(t, table, "zone_1"); got != 2 {
 		t.Errorf("zone_1 element count = %d, want 2", got)
 	}
-	// Exact rule shape: the accept rule must look up the set on BOTH source and
-	// destination (a rule with only one lookup would silently break isolation).
-	if got := lookupCountForSet(t, table, "zone_1"); got != 2 {
-		t.Errorf("zone_1 accept rule has %d set lookups, want 2 (saddr + daddr)", got)
+	// Exact rule shape: the member set is referenced three times — saddr+daddr in
+	// the same-zone accept rule plus saddr in the zone-routes accept rule (030).
+	if got := lookupCountForSet(t, table, "zone_1"); got != 3 {
+		t.Errorf("zone_1 set lookups = %d, want 3 (same-zone saddr+daddr, routes saddr)", got)
 	}
 
 	if err := m.RemoveMember(1, netip.MustParseAddr("100.127.0.2")); err != nil {
@@ -67,8 +67,8 @@ func TestZoneSetsAndRules(t *testing.T) {
 	if got := setElementCount(t, table, "zone_2"); got != 1 {
 		t.Errorf("rebuilt zone_2 = %d, want 1", got)
 	}
-	if got := lookupCountForSet(t, table, "zone_2"); got != 2 {
-		t.Errorf("zone_2 accept rule lookups = %d, want 2", got)
+	if got := lookupCountForSet(t, table, "zone_2"); got != 3 {
+		t.Errorf("zone_2 set lookups = %d, want 3", got)
 	}
 }
 
@@ -94,8 +94,8 @@ func TestDeleteZone(t *testing.T) {
 	if err := m.AddMember(3, netip.MustParseAddr("100.127.0.7")); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
-	if setElementCount(t, table, "zone_3") != 1 || lookupCountForSet(t, table, "zone_3") != 2 {
-		t.Fatal("precondition: set/rule not present")
+	if setElementCount(t, table, "zone_3") != 1 || lookupCountForSet(t, table, "zone_3") != 3 {
+		t.Fatal("precondition: set/rules not present")
 	}
 
 	if err := m.DeleteZone(3); err != nil {
@@ -107,6 +107,9 @@ func TestDeleteZone(t *testing.T) {
 	}
 	if lookupCountForSet(t, table, "zone_3") != 0 {
 		t.Error("accept rule still references zone_3 after DeleteZone")
+	}
+	if _, err := conn.GetSetByName(&nftables.Table{Family: nftables.TableFamilyINet, Name: table}, "zone_3_routes"); err == nil {
+		t.Error("routes set still present after DeleteZone")
 	}
 }
 

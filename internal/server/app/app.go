@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -68,10 +69,10 @@ func Run(ctx context.Context, opts Options) error {
 	// Rebuild client peers and zone isolation rules from the database so registered
 	// nodes and zone memberships survive a restart (the database is the source of
 	// truth, FR-018/FR-017).
-	if err := rebuildNodePeers(ctx, st.Nodes(), wgServer, log); err != nil {
+	if err := rebuildNodePeers(ctx, st.Nodes(), st.Announcements(), wgServer, log); err != nil {
 		return fmt.Errorf("rebuild node peers: %w", err)
 	}
-	if err := rebuildZoneRules(ctx, st.Zones(), nftMgr, log); err != nil {
+	if err := rebuildZoneRules(ctx, st.Zones(), st.Announcements(), nftMgr, log); err != nil {
 		return fmt.Errorf("rebuild zone rules: %w", err)
 	}
 
@@ -112,21 +113,39 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
+	// announce.pool was validated at load time; empty leaves the zero prefix,
+	// which the API reads as "announcements disabled". A configured pool also
+	// needs a kernel route at the wg interface: the VPN pool rides the interface
+	// address, but synthetic blocks have no address anywhere on the server.
+	var announcePool netip.Prefix
+	if cfg.Announce.Pool != "" {
+		announcePool, err = netip.ParsePrefix(cfg.Announce.Pool)
+		if err != nil {
+			return fmt.Errorf("invalid announce.pool: %w", err)
+		}
+		if err := wgServer.EnsurePoolRoute(announcePool); err != nil {
+			return fmt.Errorf("announce pool route: %w", err)
+		}
+		log.Info("announce pool route ready", "pool", cfg.Announce.Pool)
+	}
+
 	limiter := rate.NewLimiter(rate.Limit(cfg.RateLimit.RPS), cfg.RateLimit.Burst)
 	handler := api.NewRouter(api.Options{
-		Version:              opts.Version,
-		WG:                   wgServer,
-		NetFW:                nftMgr,
-		WGConfig:             cfg.WireGuard,
-		Status:               onlineTracker,
-		Limiter:              limiter,
-		Logger:               log,
-		Store:                st,
-		JWT:                  jwtMgr,
-		MaxDevicesPerUser:    *cfg.Limits.MaxDevicesPerUser,
-		MaxOwnedZonesPerUser: *cfg.Limits.MaxOwnedZonesPerUser,
-		InviteTTL:            inviteTTL,
-		APIDocs:              cfg.Server.APIDocsEnabled(),
+		Version:                    opts.Version,
+		WG:                         wgServer,
+		NetFW:                      nftMgr,
+		WGConfig:                   cfg.WireGuard,
+		Status:                     onlineTracker,
+		Limiter:                    limiter,
+		Logger:                     log,
+		Store:                      st,
+		JWT:                        jwtMgr,
+		MaxDevicesPerUser:          *cfg.Limits.MaxDevicesPerUser,
+		MaxOwnedZonesPerUser:       *cfg.Limits.MaxOwnedZonesPerUser,
+		InviteTTL:                  inviteTTL,
+		APIDocs:                    cfg.Server.APIDocsEnabled(),
+		AnnouncePool:               announcePool,
+		MaxAnnouncedSubnetsPerUser: *cfg.Limits.MaxAnnouncedSubnetsPerUser,
 	})
 
 	srv := &http.Server{

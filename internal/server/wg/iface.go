@@ -105,21 +105,34 @@ func ensureLink(name string) (netlink.Link, bool, error) {
 	return link, true, nil
 }
 
-// PeerConfig describes one client node as a WireGuard peer.
+// PeerConfig describes one client node as a WireGuard peer. Routes are the
+// node's announced synthetic CIDRs (feature 030): they ride in AllowedIPs next
+// to the node's own /32 so the relay routes those blocks into its tunnel.
 type PeerConfig struct {
 	PublicKey string
 	IP        netip.Addr
+	Routes    []netip.Prefix
 }
 
 // AddPeer adds (or updates) a peer for a node: its public key with the node's
 // single address as the only allowed IP, so the relay routes that address to it.
+// A freshly registered node has no announced routes; use SetPeerRoutes when
+// announcements change.
 func (s *Server) AddPeer(publicKey string, ip netip.Addr) error {
-	peer, err := peerConfig(publicKey, ip)
+	return s.SetPeerRoutes(publicKey, ip, nil)
+}
+
+// SetPeerRoutes replaces the peer's AllowedIPs with exactly the node /32 plus
+// the given announced synthetic CIDRs. ReplaceAllowedIPs makes this a full,
+// idempotent swap recomputed from the database — the derived state can never
+// drift from the source of truth.
+func (s *Server) SetPeerRoutes(publicKey string, ip netip.Addr, routes []netip.Prefix) error {
+	peer, err := peerConfig(publicKey, ip, routes)
 	if err != nil {
 		return err
 	}
 	if err := s.wgc.ConfigureDevice(s.name, wgtypes.Config{Peers: []wgtypes.PeerConfig{peer}}); err != nil {
-		return fmt.Errorf("add peer to %s: %w", s.name, err)
+		return fmt.Errorf("configure peer on %s: %w", s.name, err)
 	}
 	return nil
 }
@@ -142,7 +155,7 @@ func (s *Server) RemovePeer(publicKey string) error {
 func (s *Server) ReplacePeers(peers []PeerConfig) error {
 	cfgs := make([]wgtypes.PeerConfig, 0, len(peers))
 	for _, p := range peers {
-		pc, err := peerConfig(p.PublicKey, p.IP)
+		pc, err := peerConfig(p.PublicKey, p.IP, p.Routes)
 		if err != nil {
 			return err
 		}
@@ -154,17 +167,40 @@ func (s *Server) ReplacePeers(peers []PeerConfig) error {
 	return nil
 }
 
-func peerConfig(publicKey string, ip netip.Addr) (wgtypes.PeerConfig, error) {
+func peerConfig(publicKey string, ip netip.Addr, routes []netip.Prefix) (wgtypes.PeerConfig, error) {
 	key, err := wgtypes.ParseKey(publicKey)
 	if err != nil {
 		return wgtypes.PeerConfig{}, fmt.Errorf("parse peer key: %w", err)
 	}
-	allowed := net.IPNet{IP: ip.AsSlice(), Mask: net.CIDRMask(32, 32)}
+	allowed := make([]net.IPNet, 0, 1+len(routes))
+	allowed = append(allowed, net.IPNet{IP: ip.AsSlice(), Mask: net.CIDRMask(32, 32)})
+	for _, r := range routes {
+		r = r.Masked()
+		allowed = append(allowed, net.IPNet{IP: r.Addr().AsSlice(), Mask: net.CIDRMask(r.Bits(), 32)})
+	}
 	return wgtypes.PeerConfig{
 		PublicKey:         key,
 		ReplaceAllowedIPs: true,
-		AllowedIPs:        []net.IPNet{allowed},
+		AllowedIPs:        allowed,
 	}, nil
+}
+
+// EnsurePoolRoute installs (idempotently) a kernel route directing the given
+// pool at the WireGuard interface. The VPN pool is routed implicitly by the
+// interface address; the synthetic announce pool has no such address, so
+// without this route the kernel could not forward member traffic toward
+// announced blocks even though cryptokey routing knows the peer.
+func (s *Server) EnsurePoolRoute(pool netip.Prefix) error {
+	link, err := netlink.LinkByName(s.name)
+	if err != nil {
+		return fmt.Errorf("find interface %s: %w", s.name, err)
+	}
+	pool = pool.Masked()
+	dst := &net.IPNet{IP: pool.Addr().AsSlice(), Mask: net.CIDRMask(pool.Bits(), 32)}
+	if err := netlink.RouteReplace(&netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst}); err != nil {
+		return fmt.Errorf("route %s dev %s: %w", pool, s.name, err)
+	}
+	return nil
 }
 
 // Handshakes returns each current peer's last-handshake time keyed by public key.

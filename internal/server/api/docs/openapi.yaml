@@ -502,6 +502,113 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /api/v1/zones/{name}/announcements:
+    post:
+      tags: [zones]
+      operationId: createAnnouncement
+      summary: Announce a subnet behind one of the caller's devices into the zone
+      description: |
+        Allocates a server-unique synthetic block of the same prefix length and
+        maps it to the announced real subnet (the real subnet never enters any
+        tunnel, so different nodes may announce identical ranges). Members reach
+        hosts behind the device via addresses inside `synthetic`. Requires a
+        device whose platform performs address translation (currently `openwrt`).
+        Re-announcing the same subnet to another zone reuses the synthetic block.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ZoneName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateAnnouncementRequest" }
+      responses:
+        "201":
+          description: Subnet announced (or an existing announcement attached to this zone).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnnouncementResponse" }
+        "400":
+          description: Malformed body or invalid subnet (not RFC1918, prefix outside /16–/30, overlapping a server pool).
+          x-error-codes: [validation_error, subnet_invalid]
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Caller is not a zone participant, the device does not exist / belongs to another account, or the device is not a member of this zone.
+          x-error-codes: [not_found]
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Device platform cannot announce, the subnet overlaps another announcement of the same device, or the per-user announcement limit is reached.
+          x-error-codes: [platform_unsupported, subnet_overlap, announce_limit_reached]
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: Announcements are disabled (no synthetic pool configured) or the pool has no free block of that size.
+          x-error-codes: [announce_disabled, synthetic_pool_exhausted]
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    get:
+      tags: [zones]
+      operationId: listAnnouncements
+      summary: List the zone's announced subnets with their synthetic mappings
+      description: Any member sees every announcement's real→synthetic mapping (the synthetic address is what members dial). Empty when announcements are disabled server-side.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ZoneName"
+      responses:
+        "200":
+          description: The zone's announcements.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnnouncementListResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Caller is not a zone participant.
+          x-error-codes: [not_found]
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/zones/{name}/announcements/{id}:
+    delete:
+      tags: [zones]
+      operationId: detachAnnouncement
+      summary: Withdraw an announcement from this zone
+      description: |
+        Allowed for the announcing device's owner and for the zone owner (the
+        kick-authority model). Removing the last zone attachment reclaims the
+        announcement and frees its synthetic block for reuse.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ZoneName"
+        - name: id
+          in: path
+          required: true
+          description: Announcement ID (from the list endpoint).
+          schema: { type: integer, format: int64 }
+      responses:
+        "204":
+          description: Attachment removed; members of this zone can no longer reach the subnet.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Caller is not a participant, the announcement does not exist, it is not attached to this zone, or the caller is neither the announcer nor the zone owner.
+          x-error-codes: [not_found]
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /api/v1/zones/{name}/members/{node_id}:
     delete:
       tags: [zones]
@@ -767,6 +874,11 @@ components:
           type: string
           description: Device WireGuard public key (base64).
           example: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        platform:
+          type: string
+          pattern: "^[a-z0-9-]{1,32}$"
+          description: Self-reported client platform (e.g. windows, openwrt). Omitted reads as "unknown". Subnet announcements require a platform whose client performs address translation.
+          example: openwrt
 
     NodeResponse:
       type: object
@@ -781,6 +893,7 @@ components:
           description: True when the last WireGuard handshake is younger than 3 minutes.
           example: true
         last_handshake: { type: string, description: RFC3339 time of the last handshake; omitted when never connected., example: "2026-06-10T12:34:56Z" }
+        platform: { type: string, description: Self-reported client platform ("unknown" for devices registered before the field existed)., example: openwrt }
 
     NodeListResponse:
       type: object
@@ -861,6 +974,42 @@ components:
         members:
           type: array
           items: { $ref: "#/components/schemas/ZoneMemberResponse" }
+
+    CreateAnnouncementRequest:
+      type: object
+      required: [node_id, subnet]
+      properties:
+        node_id:
+          type: integer
+          format: int64
+          description: One of the caller's devices (platform must support announcing).
+          example: 3
+        subnet:
+          type: string
+          description: Real LAN CIDR behind the device. RFC1918 only, prefix /16–/30. May freely collide with other devices' subnets.
+          example: "192.168.1.0/24"
+
+    AnnouncementResponse:
+      type: object
+      required: [id, node_id, node_name, owner, subnet, synthetic]
+      properties:
+        id: { type: integer, format: int64, example: 7 }
+        node_id: { type: integer, format: int64, example: 3 }
+        node_name: { type: string, example: router }
+        owner: { type: string, description: Username of the announcing device's owner., example: alice }
+        subnet: { type: string, description: The real LAN CIDR behind the device., example: "192.168.1.0/24" }
+        synthetic:
+          type: string
+          description: Server-allocated unique block members dial; host suffixes are preserved 1:1 (x.y.z.50 maps to .50).
+          example: "100.100.1.0/24"
+
+    AnnouncementListResponse:
+      type: object
+      required: [announcements]
+      properties:
+        announcements:
+          type: array
+          items: { $ref: "#/components/schemas/AnnouncementResponse" }
 
     CreateInviteResponse:
       type: object
