@@ -8,6 +8,12 @@
 
 **Input**: User description: "服务端暴露 Swagger / OpenAPI 文档页面（切片 029 swagger-ui，对应 TODO.md Server MEDIUM「暴露 swagger 页面」）。需求：lanweaved 服务端提供一份完整描述现有控制面 REST API 的 OpenAPI 3 文档（覆盖 /api/v1 下全部端点），包含请求/响应 schema、bearer JWT 安全方案标注（公开端点除外）、各端点的错误码。同时服务端提供可交互的 Swagger UI 页面渲染该文档，方便联调与第三方接入。该页面可通过配置开关控制是否暴露。文档必须与实际 API 行为保持一致。不做：不改变任何现有 API 行为；不做 API 版本化改造；客户端零改动。"
 
+## Clarifications
+
+### Session 2026-06-10
+
+- Q: OpenAPI 文档里的端点描述文字（summary/description、错误码含义）用什么语言？ → A: 英文（与服务端现有英文错误消息、代码注释口径一致，面向第三方接入与工具链）。
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - 第三方开发者通过文档页面探索并调用 API (Priority: P1)
@@ -70,7 +76,7 @@
 
 ### Functional Requirements
 
-- **FR-001**: 服务端 MUST 提供一份 OpenAPI 3 格式的机器可读 API 描述文件，覆盖 `/api/v1` 下全部现有端点（当前共 19 个：healthz、login、register、refresh、logout、me、server、nodes×3、zones×5、zone-owner×3、admin×3）。
+- **FR-001**: 服务端 MUST 提供一份 OpenAPI 3 格式的机器可读 API 描述文件，覆盖 `/api/v1` 下全部现有端点（当前共 21 个操作：healthz、login、register、refresh、logout、me、server、nodes×3、zones×5、zone-owner×3、admin×3）。
 - **FR-002**: 描述文件中每个端点 MUST 包含：请求体字段及约束、成功响应结构、该端点实际可能返回的错误码及含义（错误码全集：`validation_error`、`unauthorized`、`forbidden`、`not_found`、`method_not_allowed`、`rate_limited`、`internal_error`、`invalid_credentials`、`invalid_refresh_token`、`invite_invalid`、`username_taken`、`pubkey_taken`、`node_name_taken`、`zone_name_taken`、`invalid_zone_or_password`、`device_limit_reached`、`zone_limit_reached`、`pool_exhausted`、`last_admin`、`cannot_delete_self`，各端点只列自己实际会返回的子集）。
 - **FR-003**: 需认证端点 MUST 标注 bearer 令牌安全方案；公开端点（healthz、login、register、refresh、logout）MUST 标注为无需认证；admin 端点 MUST 额外标注管理员权限要求。
 - **FR-004**: 服务端 MUST 提供一个可交互的文档页面，渲染上述描述文件，支持：浏览全部端点、填入 bearer 令牌、对真实服务器发起调用并展示响应。
@@ -82,6 +88,7 @@
 - **FR-010**: 描述文件所列端点集合 MUST 与服务器实际注册路由保持一致，且这种一致性 MUST 由自动化测试保证（新增/删除端点而未同步文档时测试失败）。
 - **FR-011**: 本切片 MUST NOT 改变任何现有 API 的路径、请求/响应格式与行为；客户端零改动。
 - **FR-012**: 文档相关路径 MUST 与业务 API 受同一全局限流约束。
+- **FR-013**: 描述文件内全部人类可读文字（端点 summary/description、字段说明、错误码含义）MUST 使用英文，与服务端现有错误消息语言一致；不提供中文或双语版本。
 
 ### Key Entities
 

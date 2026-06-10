@@ -126,6 +126,7 @@ func Run(ctx context.Context, opts Options) error {
 		MaxDevicesPerUser:    *cfg.Limits.MaxDevicesPerUser,
 		MaxOwnedZonesPerUser: *cfg.Limits.MaxOwnedZonesPerUser,
 		InviteTTL:            inviteTTL,
+		APIDocs:              cfg.Server.APIDocsEnabled(),
 	})
 
 	srv := &http.Server{

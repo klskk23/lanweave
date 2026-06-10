@@ -36,6 +36,11 @@ type Options struct {
 	// (0 = never expire). A zero-value Options (e.g. a test harness) issues
 	// never-expiring codes.
 	InviteTTL time.Duration
+	// APIDocs exposes the Swagger UI / OpenAPI document under /api/docs/ when
+	// true. When false the docs routes are simply not registered, so they fall
+	// through to the API-wide notFound and stay indistinguishable from paths
+	// that never existed.
+	APIDocs bool
 }
 
 // NewRouter returns the fully wrapped handler. Middleware order, outermost first:
@@ -57,44 +62,14 @@ func NewRouter(opts Options) http.Handler {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/healthz", healthz(opts.Version))
-
-	// Public (rate-limited) endpoints.
-	mux.HandleFunc("POST /api/v1/login", h.login)
-	mux.HandleFunc("POST /api/v1/register", h.register)
-	// Refresh is public: it authenticates via the refresh token in the body because
-	// the access JWT is expired at refresh time (NO AuthRequired).
-	mux.HandleFunc("POST /api/v1/refresh", h.refresh)
-	// Logout is public for the same reason: it revokes the refresh token in the body
-	// even when the access JWT is already expired (NO AuthRequired).
-	mux.HandleFunc("POST /api/v1/logout", h.logout)
-
-	// Authenticated endpoints.
-	mux.Handle("GET /api/v1/me", AuthRequired(opts.JWT)(http.HandlerFunc(h.me)))
-	mux.Handle("GET /api/v1/server", AuthRequired(opts.JWT)(http.HandlerFunc(h.serverInfo)))
-	mux.Handle("POST /api/v1/nodes", AuthRequired(opts.JWT)(http.HandlerFunc(h.registerNode)))
-	mux.Handle("GET /api/v1/nodes", AuthRequired(opts.JWT)(http.HandlerFunc(h.listNodes)))
-	mux.Handle("DELETE /api/v1/nodes/{id}", AuthRequired(opts.JWT)(http.HandlerFunc(h.deleteNode)))
-
-	// Zones (any authenticated user).
-	mux.Handle("POST /api/v1/zones", AuthRequired(opts.JWT)(http.HandlerFunc(h.createZone)))
-	mux.Handle("GET /api/v1/zones", AuthRequired(opts.JWT)(http.HandlerFunc(h.listZones)))
-	mux.Handle("POST /api/v1/zones/{name}/join", AuthRequired(opts.JWT)(http.HandlerFunc(h.joinZone)))
-	mux.Handle("POST /api/v1/zones/{name}/leave", AuthRequired(opts.JWT)(http.HandlerFunc(h.leaveZone)))
-	mux.Handle("GET /api/v1/zones/{name}/members", AuthRequired(opts.JWT)(http.HandlerFunc(h.zoneMembers)))
-
-	// Zone owner controls (owner only).
-	mux.Handle("PATCH /api/v1/zones/{name}", AuthRequired(opts.JWT)(http.HandlerFunc(h.changeZonePassword)))
-	mux.Handle("DELETE /api/v1/zones/{name}", AuthRequired(opts.JWT)(http.HandlerFunc(h.deleteZone)))
-	mux.Handle("DELETE /api/v1/zones/{name}/members/{node_id}", AuthRequired(opts.JWT)(http.HandlerFunc(h.kickMember)))
-
-	// Admin-only endpoints.
-	mux.Handle("POST /api/v1/admin/invites",
-		AuthRequired(opts.JWT)(AdminRequired()(http.HandlerFunc(h.createInvite))))
-	mux.Handle("GET /api/v1/admin/invites",
-		AuthRequired(opts.JWT)(AdminRequired()(http.HandlerFunc(h.listInvites))))
-	mux.Handle("DELETE /api/v1/admin/users/{id}",
-		AuthRequired(opts.JWT)(AdminRequired()(http.HandlerFunc(h.deleteUser))))
+	for _, rt := range routes(h, opts) {
+		mux.Handle(rt.pattern, rt.handler)
+	}
+	if opts.APIDocs {
+		for _, rt := range docsRoutes() {
+			mux.Handle(rt.pattern, rt.handler)
+		}
+	}
 
 	mux.HandleFunc("/", notFound)
 

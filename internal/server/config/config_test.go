@@ -419,3 +419,48 @@ func TestSecretRedaction(t *testing.T) {
 		t.Errorf("expected [REDACTED] marker in logs, got: %s", out)
 	}
 }
+
+// TestAPIDocsEnabledThreeState proves the api_docs toggle distinguishes "unset"
+// (docs exposed, the chosen default) from explicit false (hidden). A bare bool
+// would collapse unset and false; *bool keeps them apart, mirroring TLS.
+func TestAPIDocsEnabledThreeState(t *testing.T) {
+	decoded := []struct {
+		name     string
+		docsLine string
+		want     bool
+	}{
+		{"unset key defaults to enabled", "", true},
+		{"explicit true", "api_docs = true", true},
+		{"explicit false hides docs", "api_docs = false", false},
+	}
+	for _, tc := range decoded {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := config.Load(writeTLSToggleConfig(t, tc.docsLine))
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if got := c.Server.APIDocsEnabled(); got != tc.want {
+				t.Errorf("APIDocsEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// Direct struct three-state (nil pointer must read as enabled, never panic).
+	tru, fls := true, false
+	for _, tc := range []struct {
+		name string
+		ptr  *bool
+		want bool
+	}{
+		{"nil pointer is enabled", nil, true},
+		{"&true", &tru, true},
+		{"&false", &fls, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := config.ServerConfig{APIDocs: tc.ptr}
+			if got := s.APIDocsEnabled(); got != tc.want {
+				t.Errorf("APIDocsEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -89,6 +89,9 @@ func newHarnessOpts(t *testing.T, inviteTTL time.Duration) *harness {
 		JWT:       jwtMgr,
 		Status:    fakeStat,
 		InviteTTL: inviteTTL,
+		// Docs on: the whole suite doubles as proof that exposing the docs
+		// surface leaves every business endpoint untouched (FR-011).
+		APIDocs: true,
 	})
 	return &harness{t: t, router: router, store: st, jwt: jwtMgr, logBuf: &buf, adminPW: adminPW, status: fakeStat}
 }
