@@ -29,6 +29,8 @@ var knownErrorCodes = map[string]bool{
 func routeOperations(t *testing.T) map[string]bool {
 	t.Helper()
 	ops := map[string]bool{}
+	// Zero-value handlers/Options (nil JWT, nil store) are safe here because the
+	// route table is only enumerated for its patterns; no handler is ever invoked.
 	for _, rt := range routes(&handlers{}, Options{}) {
 		method, path, found := strings.Cut(rt.pattern, " ")
 		if !found {
