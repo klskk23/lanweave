@@ -1,7 +1,7 @@
 VERSION ?= 0.1.0+$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
 
-.PHONY: build deb client icons test lint vet fmt tidy clean
+.PHONY: build deb client icons routerd routerd-cross test lint vet fmt tidy clean
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o ./lanweaved ./cmd/lanweaved
@@ -37,6 +37,17 @@ fmt:
 lint: vet
 	@test -z "$$(gofmt -l .)" || (echo "gofmt: files need formatting:"; gofmt -l .; exit 1)
 	@command -v staticcheck >/dev/null 2>&1 && staticcheck ./... || echo "staticcheck not installed; skipping"
+
+# OpenWrt router client (feature 031): single static binary, kernel WireGuard.
+routerd:
+	CGO_ENABLED=0 go build -o dist/lanweave-routerd ./cmd/lanweave-routerd
+
+# Cross targets for the supported router architectures (modern devices,
+# >=64MB flash). mipsle needs softfloat on common MT76xx SoCs.
+routerd-cross:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/lanweave-routerd-amd64 ./cmd/lanweave-routerd
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o dist/lanweave-routerd-arm64 ./cmd/lanweave-routerd
+	CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -o dist/lanweave-routerd-mipsle ./cmd/lanweave-routerd
 
 tidy:
 	go mod tidy

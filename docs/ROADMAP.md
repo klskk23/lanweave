@@ -40,6 +40,7 @@
 | 028 | tunnel-auto-reconnect ✅                 | 客户端     | 010, 011, 018 | 握手陈旧自愈重连:新起 health goroutine 每 15s 查 wg 最后握手,已连接但 age>240s 自动重连;`desiredConnected` 仅内存态(手动连成功置真/手动断开置假),重连失败每 15s 重试到底(无退避),手动断开必胜(单飞守卫);重试中 UI 黄灯+按钮显「断开」、全程静默;wg 源端口本即 OS 随机临时端口(已满足,仅文档化) |
 | 029 | swagger-ui ✅                            | 服务端     | 001, 002   | 服务端 `/api/docs/` 暴露自包含 Swagger UI + 手写 OpenAPI 3 文档(21 个操作,错误码/鉴权全标注,全英文);`[server] api_docs` 三态开关缺省=开启,关闭后与未知路径逐字节同 404;路由表重构为单一真源,文档-路由双向一致性测试防漂移;零新增 Go 运行时依赖(swagger-ui-dist 5.32.6 vendor 入仓) |
 | 030 | server-subnet-announce ✅                | 服务端     | 004, 005, 023 | 子网宣告控制面(合成段映射):`[announce] pool` 池配置,(节点,真实子网)→全服唯一等长合成段,跨节点真实网段任意重叠;platform 自报门禁(仅 openwrt 可宣告),配额三态;peer AllowedIPs+interval routes set+ct 回程规则,合成池内核路由;六路径级联回收+重启重建;netns 真流量 e2e(成员通/外人丢/反向新建丢) |
+| 031 | openwrt-client-base ✅                   | 客户端     | 002, 004, 030 | OpenWrt 无头客户端:单二进制 lanweave-routerd(daemon+CLI 13 子命令),内核 WireGuard(wgctrl+netlink),复用 apiclient/onboard/state/keyring 栈(platform=openwrt 注册,NodeID 入 state v3);TOFU=018/续期=024/登出三态=025/自愈 15s/240s=028 跨端对齐;procd 脚本+三架构交叉编译(amd64/arm64/mipsle);真内核握手集成测试+零机密输出断言 |
 
 ---
 

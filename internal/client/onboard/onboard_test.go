@@ -26,6 +26,7 @@ type fakeAPI struct {
 
 	registerCalls     int
 	registerNodeCalls int
+	lastPlatform      string
 }
 
 func (f *fakeAPI) Register(_, _, _ string) error { f.registerCalls++; return f.registerErr }
@@ -33,11 +34,15 @@ func (f *fakeAPI) Login(_, _ string) error       { return f.loginErr }
 func (f *fakeAPI) Token() string                 { return f.token }
 func (f *fakeAPI) RefreshToken() string          { return f.refreshToken }
 func (f *fakeAPI) RegisterNode(name, pub string) (protocol.NodeResponse, error) {
+	return f.RegisterNodePlatform(name, pub, "")
+}
+func (f *fakeAPI) RegisterNodePlatform(name, pub, platform string) (protocol.NodeResponse, error) {
 	f.registerNodeCalls++
+	f.lastPlatform = platform
 	if f.registerNode != nil {
 		return f.registerNode(name, pub)
 	}
-	return protocol.NodeResponse{ID: 1, Name: name, IP: "100.127.0.2"}, nil
+	return protocol.NodeResponse{ID: 7, Name: name, IP: "100.127.0.2", Platform: platform}, nil
 }
 func (f *fakeAPI) ListNodes() (protocol.NodeListResponse, error) {
 	if f.listNodes != nil {
@@ -253,5 +258,34 @@ func TestPartialFailureRecovery(t *testing.T) {
 	}
 	if !state.Exists(statePath) {
 		t.Error("state not written after recovery")
+	}
+}
+
+// TestProvisionPlatformAndNodeID covers the 031 additions: the self-reported
+// platform reaches registration and the assigned node id lands in the state
+// record (zero only for pre-v3 records).
+func TestProvisionPlatformAndNodeID(t *testing.T) {
+	api := &fakeAPI{}
+	dir := t.TempDir()
+	p := &onboard.Provisioner{
+		API:       api,
+		Keys:      keyring.NewFake(),
+		StatePath: filepath.Join(dir, "state.json"),
+		ServerURL: "https://vpn.example.com",
+		Platform:  "openwrt",
+	}
+	rec, err := p.Provision(onboard.Credentials{Mode: onboard.SignIn, Username: "alice", Password: "pw"}, "router")
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if api.lastPlatform != "openwrt" {
+		t.Errorf("platform sent = %q, want openwrt", api.lastPlatform)
+	}
+	if rec.NodeID != 7 {
+		t.Errorf("state NodeID = %d, want 7", rec.NodeID)
+	}
+	loaded, err := state.Load(p.StatePath)
+	if err != nil || loaded.NodeID != 7 {
+		t.Errorf("persisted NodeID = %d (%v), want 7", loaded.NodeID, err)
 	}
 }

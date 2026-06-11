@@ -91,7 +91,7 @@ zone 在服务端落地为 nftables set，是 forward 链上的允许规则。
   仅 Windows 生效，其它平台为 no-op（偏好仍持久化）。
 
 ### 3.5 WireGuard 密钥
-- **客户端生成**密钥对，私钥仅本机存储（Windows DPAPI / keyring）。
+- **客户端生成**密钥对，私钥仅本机存储（Windows DPAPI / keyring；OpenWrt 路由器为 root-only 文件，见 §11）。
 - 客户端上传公钥到服务端，服务端把它写入对应 node 的 WG peer。
 - 服务端零私钥（除自身接口私钥）。
 - node 删除即从 WG peer 列表移除，对应公钥失效。
@@ -278,6 +278,12 @@ table inet lanweave {
 
 ## 9. Windows 客户端
 
+> 自 031 起客户端形态有两种：本章的 Windows GUI 客户端，与 **OpenWrt 无头客户端**
+> `lanweave-routerd`（单二进制 daemon + CLI 子命令；隧道用**内核 WireGuard**（wgctrl+netlink），
+> procd 守护；凭据/状态落 `/etc/lanweave/`（0600/0700）；TOFU/续期/登出/自愈语义与本章
+> 客户端逐条对齐（018/024/025/028）；首发交叉编译 amd64/arm64/mipsle）。OpenWrt 端是
+> 032 子网宣告的宣告端载体。
+
 ### 9.1 技术栈
 - UI：**Fyne**（纯 Go）。
 - WG 后端：**嵌入 wireguard-go** 用户态实现 + **WinTun** 驱动。
@@ -431,6 +437,7 @@ max_owned_zones_per_user = 10   # 同上，仅统计本人创建（拥有）的 
 | TOFU 信任自签 / 内网证书（feature 018 取代 017 会话级 opt-in） | 首次连接证书过不了系统 CA 时弹窗、显式信任、按 server 持久化叶证书 SHA-256 指纹；验证=指纹或系统 CA；证书变更弹更重警告并阻断、需显式接受；中性「已信任」项于 overflow 菜单（feature 022 改） |
 | 客户端主机防火墙入站放行（feature 018，默认关、Windows-only） | 用户显式开启 Hero 卡片内 Switch 且隧道已连接才装具名规则 `lanweave-vpn-inbound`（仅 `remoteip=100.127.0.0/16`、`profile=any`）；开启即让同网段 peer 触达本机所有本地服务（无二次确认，开关旁 CIDR 副标题标识范围）；断开 / 取消 / 登出 / 退出即删，启动清扫孤儿规则 |
 | 服务端明文 HTTP 监听（`tls=false`，feature 021） | 仅显式 `tls=false` 才明文；缺省/`tls=true` 仍 HTTPS 且缺证书硬失败（绝不静默降级）；明文绑定非回环地址启动告警；须置于 TLS 终止反代之后、勿暴露明文监听公网；客户端仍连反代 `https://`、数据面 WireGuard 不变 |
+| 路由器端凭据明文落盘（feature 031，OpenWrt 无 keyring） | refresh token 与设备私钥以 0600 文件存于 `/etc/lanweave/keys/`（目录 0700，root-only）；root 失守即全失——单用户嵌入式设备场景接受；登出吊销 RT 并清盘 |
 | 节点 platform 为客户端自报（feature 030） | 谎报 `openwrt` 可越过宣告能力门禁，但后果限于「宣告了自己兜不住的网段、本 zone 内不通」——隔离仍由 nftables 按合成段管控，不产生越权访问 |
 | 宣告端 MASQUERADE 抹掉真实访问源（feature 030/032） | 目标 LAN 内主机只见路由器 LAN IP，无法审计是哪个 zone 成员访问；接受（NAT 方案固有），zone 准入密码即信任边界 |
 | 宣告内容的社工风险（feature 030） | 成员可声称任意内网内容（"我的 NAS"）诱导同 zone 成员访问其控制的服务；zone 全透明互信模型下接受，准入密码即边界 |

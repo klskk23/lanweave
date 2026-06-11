@@ -13,7 +13,9 @@ import (
 	"lanweave/internal/client/state"
 )
 
-// KeepaliveSeconds is the persistent-keepalive interval (DESIGN §6): keeps an idle
+// KeepaliveSeconds is the persistent-keepalive interval (DESIGN §3.4; also hardcoded
+// by the router client in cmd/lanweave-routerd, which must not import this
+// wireguard-go-laden package): keeps an idle
 // connection alive and visible as online.
 const KeepaliveSeconds = 25
 

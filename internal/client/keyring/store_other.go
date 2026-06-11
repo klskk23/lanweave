@@ -22,6 +22,14 @@ func Open() (Store, error) {
 	return &fileStore{dir: filepath.Join(dir, "lanweave", "secrets")}, nil
 }
 
+// OpenAt returns a file-backed store rooted at the given directory (created
+// 0700 on first Set, files 0600). The OpenWrt router client uses this with its
+// data dir — routers have no OS keyring, so a root-only file is the accepted
+// storage (DESIGN §11).
+func OpenAt(dir string) Store {
+	return &fileStore{dir: dir}
+}
+
 type fileStore struct{ dir string }
 
 func (s *fileStore) path(name string) string {

@@ -28,6 +28,7 @@ type apiClient interface {
 	Register(invite, username, password string) error
 	Login(username, password string) error
 	RegisterNode(name, pubKey string) (protocol.NodeResponse, error)
+	RegisterNodePlatform(name, pubKey, platform string) (protocol.NodeResponse, error)
 	ListNodes() (protocol.NodeListResponse, error)
 	ServerInfo() (protocol.ServerInfoResponse, error)
 	// Token returns the session token set by Login; persisted after a successful
@@ -60,6 +61,9 @@ type Provisioner struct {
 	// PinnedCertSHA256 is the TOFU certificate fingerprint the user trusted during onboarding
 	// (empty when the server verified against a system CA); it is recorded in the state file.
 	PinnedCertSHA256 string
+	// Platform is the self-reported client platform sent with node registration
+	// (feature 031, e.g. "openwrt"). Empty keeps the pre-031 request shape.
+	Platform string
 }
 
 func (p *Provisioner) keyName() string {
@@ -85,11 +89,24 @@ func (p *Provisioner) Authenticate(c Credentials) error {
 // idempotent recovery), fetch server info, and write the state record. On failure the
 // caller may retry; on cancel call Cleanup.
 func (p *Provisioner) Provision(c Credentials, nodeName string) (state.Record, error) {
+	// Validate before authenticating (pre-031 behavior): an empty device name
+	// must not trigger sign-in side effects.
 	if nodeName == "" {
 		return state.Record{}, errors.New("device name is required")
 	}
 	if err := p.Authenticate(c); err != nil {
 		return state.Record{}, err
+	}
+	return p.ProvisionDevice(nodeName)
+}
+
+// ProvisionDevice is the post-authentication tail of Provision: generate and
+// store the device key, register the device, fetch server info, persist the
+// state record and cache the tokens. Split out for clients whose sign-in and
+// device registration are separate commands (the router CLI, feature 031).
+func (p *Provisioner) ProvisionDevice(nodeName string) (state.Record, error) {
+	if nodeName == "" {
+		return state.Record{}, errors.New("device name is required")
 	}
 
 	priv, pub, err := wgkey.GenerateKeyPair()
@@ -102,7 +119,7 @@ func (p *Provisioner) Provision(c Credentials, nodeName string) (state.Record, e
 		return state.Record{}, fmt.Errorf("store device key: %w", err)
 	}
 
-	ip, err := p.registerDevice(nodeName, pub)
+	ip, nodeID, err := p.registerDevice(nodeName, pub)
 	if err != nil {
 		return state.Record{}, err
 	}
@@ -120,6 +137,7 @@ func (p *Provisioner) Provision(c Credentials, nodeName string) (state.Record, e
 		Endpoint:         info.Endpoint,
 		Network:          info.Network,
 		PinnedCertSHA256: p.PinnedCertSHA256,
+		NodeID:           nodeID,
 	}
 	if err := state.Save(p.StatePath, rec); err != nil {
 		return state.Record{}, fmt.Errorf("save state: %w", err)
@@ -143,24 +161,24 @@ func (p *Provisioner) Provision(c Credentials, nodeName string) (state.Record, e
 // pubkey_taken (this session's earlier attempt already registered the device) it recovers
 // the address by matching the name in the device list — idempotent, no duplicate. A
 // node_name_taken error is returned for the UI to ask for a different name.
-func (p *Provisioner) registerDevice(nodeName, pub string) (string, error) {
-	node, err := p.API.RegisterNode(nodeName, pub)
+func (p *Provisioner) registerDevice(nodeName, pub string) (string, int64, error) {
+	node, err := p.API.RegisterNodePlatform(nodeName, pub, p.Platform)
 	switch {
 	case err == nil:
-		return node.IP, nil
+		return node.IP, node.ID, nil
 	case errors.Is(err, apiclient.ErrPubKeyTaken):
 		list, lerr := p.API.ListNodes()
 		if lerr != nil {
-			return "", lerr
+			return "", 0, lerr
 		}
 		for _, n := range list.Nodes {
 			if n.Name == nodeName {
-				return n.IP, nil
+				return n.IP, n.ID, nil
 			}
 		}
-		return "", errors.New("device was registered but its address could not be recovered")
+		return "", 0, errors.New("device was registered but its address could not be recovered")
 	default:
-		return "", err
+		return "", 0, err
 	}
 }
 

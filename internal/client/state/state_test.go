@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"lanweave/internal/client/state"
@@ -120,12 +121,12 @@ func TestNewFieldsRoundTrip(t *testing.T) {
 	if got.PinnedCertSHA256 != "ab12cd34" || !got.FirewallAllowVPN {
 		t.Errorf("new fields not preserved: %+v", got)
 	}
-	if got.SchemaVersion != 2 {
-		t.Errorf("expected schema version 2 after save, got %d", got.SchemaVersion)
+	if got.SchemaVersion != 3 {
+		t.Errorf("expected schema version 3 after save, got %d", got.SchemaVersion)
 	}
 	raw, _ := os.ReadFile(path)
-	if !strings.Contains(string(raw), `"schema_version": 2`) {
-		t.Errorf("state file should record schema_version 2: %s", raw)
+	if !strings.Contains(string(raw), `"schema_version": 3`) {
+		t.Errorf("state file should record schema_version 3: %s", raw)
 	}
 }
 
@@ -136,5 +137,52 @@ func TestDefaultPath(t *testing.T) {
 	}
 	if !strings.HasSuffix(filepath.ToSlash(p), "lanweave/state.json") {
 		t.Errorf("unexpected default path: %s", p)
+	}
+}
+
+// TestLoadV2RecordDefaultsNodeID proves a pre-031 (v2) record loads unchanged
+// with the new NodeID defaulted to zero ("unknown").
+func TestLoadV2RecordDefaultsNodeID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	v2 := `{"schema_version":2,"server_url":"https://vpn.example.com","node_name":"laptop","ip":"100.127.0.7","server_public_key":"pk","endpoint":"vpn.example.com:51820","network":"100.127.0.0/16","pinned_cert_sha256":"abc"}`
+	if err := os.WriteFile(path, []byte(v2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := state.Load(path)
+	if err != nil {
+		t.Fatalf("load v2: %v", err)
+	}
+	if r.NodeID != 0 {
+		t.Errorf("NodeID = %d, want 0 for v2 record", r.NodeID)
+	}
+	if r.ServerURL != "https://vpn.example.com" || r.PinnedCertSHA256 != "abc" {
+		t.Errorf("v2 fields lost: %+v", r)
+	}
+}
+
+// TestSaveConcurrent proves the temp+rename atomic write keeps the record
+// readable under concurrent writers (FR-014: CLI and daemon may both save).
+func TestSaveConcurrent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	base := state.Record{ServerURL: "https://s", NodeName: "n", IP: "100.127.0.2"}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r := base
+			r.NodeID = int64(i + 1)
+			if err := state.Save(path, r); err != nil {
+				t.Errorf("save %d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	r, err := state.Load(path)
+	if err != nil {
+		t.Fatalf("load after concurrent saves: %v", err)
+	}
+	if r.NodeID < 1 || r.NodeID > 16 {
+		t.Errorf("record corrupted: %+v", r)
 	}
 }
