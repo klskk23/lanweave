@@ -76,11 +76,16 @@ func (e *env) natTable() natTable {
 	return realNAT{}
 }
 
+// defaultReconcileEvery is the announcement reconcile cadence (DESIGN §9 /
+// 032 contract: convergence within a minute; the rebuild itself is the
+// self-heal, so cycles are unconditional by design).
+const defaultReconcileEvery = 60 * time.Second
+
 func (e *env) reconcilePeriod() time.Duration {
 	if e.reconcileEvery > 0 {
 		return e.reconcileEvery
 	}
-	return 60 * time.Second
+	return defaultReconcileEvery
 }
 
 func (e *env) statePath() string   { return filepath.Join(e.dataDir, "state.json") }

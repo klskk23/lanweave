@@ -11,6 +11,8 @@ package natctl
 import (
 	"fmt"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/google/nftables"
@@ -22,6 +24,26 @@ import (
 
 // DefaultTable is the production table name on the router.
 const DefaultTable = "lanweave_rt"
+
+// lockTable takes an exclusive cross-process flock for the table's mutations:
+// the daemon's reconcile loop and a CLI command run in separate processes and
+// must not interleave their delete-table/add-table flushes. The lock file
+// lives in the OS temp dir keyed by table name; the returned func releases it.
+func lockTable(table string) (func(), error) {
+	path := filepath.Join(os.TempDir(), "lanweave-nat-"+table+".lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open nat lock: %w", err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("lock nat table: %w", err)
+	}
+	return func() {
+		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
 
 // Rule is one announcement's translation: traffic to Synthetic is prefix-DNAT'd
 // to Real; forwarded traffic from the VPN pool toward Real is masqueraded.
@@ -58,6 +80,11 @@ func ruleFromUserData(b []byte) (Rule, bool) {
 // (srcnat) chain, and lay one DNAT-prefix + one masquerade rule per entry, all
 // in one atomic flush.
 func Rebuild(table string, vpnPool netip.Prefix, rules []Rule) error {
+	unlock, err := lockTable(table)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	conn, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("open nftables: %w", err)
@@ -103,6 +130,11 @@ func Rebuild(table string, vpnPool netip.Prefix, rules []Rule) error {
 
 // Teardown removes the translation table; a missing table is success.
 func Teardown(table string) error {
+	unlock, err := lockTable(table)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	conn, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("open nftables: %w", err)

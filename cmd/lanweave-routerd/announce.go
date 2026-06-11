@@ -152,6 +152,9 @@ func cmdAnnounceList(e *env, rec state.Record, c *apiclient.Client) int {
 		return 0
 	}
 	current, err := e.natTable().Current()
+	if err != nil {
+		fmt.Fprintf(e.stderr, "warning: could not read local translation table (%s)\n", err)
+	}
 	inSync := err == nil && sameRules(current, rules)
 
 	w := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
