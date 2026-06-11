@@ -13,9 +13,9 @@ import (
 )
 
 // SchemaVersion is the current state-record schema version. v2 (feature 018) adds the
-// TOFU certificate pin and the firewall-allow preference; v1 records load unchanged with
-// both new fields defaulted.
-const SchemaVersion = 2
+// TOFU certificate pin and the firewall-allow preference; v3 (feature 031) adds the
+// node id. Older records load unchanged with the newer fields defaulted.
+const SchemaVersion = 3
 
 // Record is the persisted, non-secret onboarding record.
 type Record struct {
@@ -33,6 +33,10 @@ type Record struct {
 	// FirewallAllowVPN is the persisted preference to allow inbound traffic from the VPN
 	// subnet to this device. false (default) means closed.
 	FirewallAllowVPN bool `json:"firewall_allow_vpn,omitempty"`
+	// NodeID is this device's server-side node id (feature 031). Zero on records
+	// written before v3; consumers that need it (router logout, announcements)
+	// must treat zero as "unknown".
+	NodeID int64 `json:"node_id,omitempty"`
 }
 
 // DefaultPath returns the per-user state file path: %LOCALAPPDATA%\lanweave\state.json on

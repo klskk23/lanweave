@@ -208,8 +208,16 @@ func (c *Client) Logout() error {
 
 // RegisterNode registers this device's public key under a name and returns the node.
 func (c *Client) RegisterNode(name, pubKey string) (protocol.NodeResponse, error) {
+	return c.RegisterNodePlatform(name, pubKey, "")
+}
+
+// RegisterNodePlatform is RegisterNode with an explicit self-reported platform
+// (e.g. "openwrt", the announce-capability gate of feature 030). Empty platform
+// keeps the pre-030 request shape, so existing clients are unchanged.
+func (c *Client) RegisterNodePlatform(name, pubKey, platform string) (protocol.NodeResponse, error) {
 	var resp protocol.NodeResponse
-	_, err := c.do(http.MethodPost, "/api/v1/nodes", true, protocol.RegisterNodeRequest{Name: name, WGPubKey: pubKey}, &resp)
+	_, err := c.do(http.MethodPost, "/api/v1/nodes", true,
+		protocol.RegisterNodeRequest{Name: name, WGPubKey: pubKey, Platform: platform}, &resp)
 	return resp, err
 }
 
