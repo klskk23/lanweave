@@ -8,8 +8,11 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
+
+	"lanweave/internal/router/engine"
 )
 
 const (
@@ -36,11 +39,6 @@ type Daemon struct {
 	Engine Engine
 	Log    *slog.Logger
 	Tick   time.Duration
-
-	// everConnected flips once a handshake has been observed for the current
-	// session; staleness only applies after that (a fresh session legitimately
-	// takes a moment to complete its first handshake).
-	everConnected bool
 }
 
 func (d *Daemon) tick() time.Duration {
@@ -84,8 +82,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 func (d *Daemon) tryUp() bool {
-	d.everConnected = false
-	if err := d.Engine.Up(); err != nil {
+	err := d.Engine.Up()
+	if errors.Is(err, engine.ErrIfaceExists) {
+		// A leftover interface from an unclean death (OOM kill, power loss
+		// before procd's stop hook). The daemon is the interface's only owner,
+		// so adopt-by-replace: tear the stale one down and bring up fresh.
+		d.Log.Warn("stale tunnel interface found; replacing it")
+		if derr := d.Engine.Down(); derr != nil {
+			d.Log.Error("stale interface teardown failed; will retry", "error", derr.Error())
+			return false
+		}
+		err = d.Engine.Up()
+	}
+	if err != nil {
 		d.Log.Error("tunnel up failed; will retry", "error", err.Error())
 		return false
 	}
@@ -104,6 +113,5 @@ func (d *Daemon) stale() bool {
 	if hs.IsZero() {
 		return false // never connected this session; keep waiting
 	}
-	d.everConnected = true
 	return time.Since(hs) > staleAfter
 }

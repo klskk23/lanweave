@@ -78,8 +78,11 @@ func newTestServer(t *testing.T) *testServer {
 	// and a collision there silently eats our handshake traffic.
 	port := 19000 + int(b[0])%1000
 	wgName := "wgr" + hex.EncodeToString(b)
+	// A private VPN pool: the engine RouteReplace's this /16 in the SHARED test
+	// namespace, and hijacking 100.127.0.0/16 would break parallel packages
+	// (the Windows tunnel integration tests route that pool).
 	wgCfg := config.WireGuardConfig{
-		Network: "100.127.0.0/16", ListenPort: port, Interface: wgName, MTU: 1420,
+		Network: "100.111.0.0/16", ListenPort: port, Interface: wgName, MTU: 1420,
 		Endpoint: fmt.Sprintf("127.0.0.1:%d", port),
 	}
 	serverKey, _ := wgtypes.GeneratePrivateKey()
@@ -128,7 +131,7 @@ func certFP(cert *x509.Certificate) string {
 func cli(t *testing.T, dataDir, stdin string, sink *bytes.Buffer, args ...string) (int, string, string) {
 	t.Helper()
 	var out, errb bytes.Buffer
-	full := append([]string{"--data-dir", dataDir}, args...)
+	full := append([]string{"--data-dir", dataDir, "--iface", testIface}, args...)
 	code := run(full, strings.NewReader(stdin), &out, &errb)
 	if sink != nil {
 		sink.WriteString(out.String())
@@ -146,7 +149,10 @@ func mustCLI(t *testing.T, dataDir, stdin string, sink *bytes.Buffer, args ...st
 	return out
 }
 
-const testIface = "lanweave0"
+// testIface is deliberately NOT the production lanweave0: the Windows tunnel
+// integration tests create lanweave0 in the same shared test namespace, and
+// the daemon's stale-interface adoption would tear their live interface down.
+const testIface = "lwrcli0"
 
 func cleanupIface(t *testing.T) {
 	t.Cleanup(func() {
@@ -232,13 +238,13 @@ func TestCLIOnboardAndTunnel(t *testing.T) {
 	runDaemon := func() (context.CancelFunc, chan int) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan int, 1)
-		e := &env{dataDir: dataDir, stdin: strings.NewReader(""), stdout: sink, stderr: sink}
+		e := &env{dataDir: dataDir, iface: testIface, stdin: strings.NewReader(""), stdout: sink, stderr: sink}
 		go func() { done <- cmdRunCtx(e, ctx) }()
 		return cancel, done
 	}
 	waitHandshake := func() {
 		t.Helper()
-		eng := engine.New(engine.Config{ServerPubKey: readServerPub(t, dataDir)})
+		eng := engine.New(engine.Config{Iface: testIface, ServerPubKey: readServerPub(t, dataDir)})
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			if hs, err := eng.LastHandshake(); err == nil && !hs.IsZero() {
@@ -254,7 +260,7 @@ func TestCLIOnboardAndTunnel(t *testing.T) {
 
 	// status reflects the live tunnel.
 	out := mustCLI(t, dataDir, "", sink, "status")
-	for _, want := range []string{"daemon: running", "tunnel: connected", "ip: 100.127.0.2", "zones:"} {
+	for _, want := range []string{"daemon: running", "tunnel: connected", "ip: 100.111.0.2", "zones:"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status output %q missing %q", out, want)
 		}
@@ -316,7 +322,7 @@ func TestCLIZones(t *testing.T) {
 		t.Fatalf("zone list = %q, want homelab as owner", out)
 	}
 	out = mustCLI(t, dataDir, "", sink, "zone", "members", "homelab")
-	if !strings.Contains(out, "home-router") || !strings.Contains(out, "100.127.0.2") || !strings.Contains(out, "alice") {
+	if !strings.Contains(out, "home-router") || !strings.Contains(out, "100.111.0.2") || !strings.Contains(out, "alice") {
 		t.Fatalf("members = %q, want name/IP/owner of this device", out)
 	}
 

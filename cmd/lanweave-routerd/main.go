@@ -39,6 +39,7 @@ const defaultDataDir = "/etc/lanweave"
 // so tests can drive commands with private dirs and captured streams.
 type env struct {
 	dataDir  string
+	iface    string // tunnel interface name override (tests; default lanweave0)
 	insecure bool
 	stdin    io.Reader
 	stdout   io.Writer
@@ -87,6 +88,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		case strings.HasPrefix(args[0], "--data-dir="):
 			e.dataDir = strings.TrimPrefix(args[0], "--data-dir=")
 			args = args[1:]
+		case args[0] == "--iface" && len(args) > 1:
+			e.iface = args[1]
+			args = args[2:]
 		case args[0] == "--help" || args[0] == "-h":
 			usage(stdout)
 			return 0
@@ -358,6 +362,7 @@ func (e *env) engineFromState() (*engine.Engine, state.Record, error) {
 		return nil, state.Record{}, fmt.Errorf("state network %q invalid: %w", rec.Network, err)
 	}
 	return engine.New(engine.Config{
+		Iface:        e.iface,
 		PrivateKey:   string(priv),
 		Address:      addr,
 		Network:      network,
@@ -389,7 +394,7 @@ func cmdRunCtx(e *env, ctx context.Context) int {
 }
 
 func cmdDown(e *env) int {
-	if err := engine.New(engine.Config{}).Down(); err != nil {
+	if err := engine.New(engine.Config{Iface: e.iface}).Down(); err != nil {
 		return e.fail("%s", err)
 	}
 	fmt.Fprintln(e.stdout, "tunnel down")
@@ -401,7 +406,7 @@ func cmdStatus(e *env) int {
 	if err != nil {
 		return e.fail("%s", err)
 	}
-	eng := engine.New(engine.Config{ServerPubKey: rec.ServerPublicKey})
+	eng := engine.New(engine.Config{Iface: e.iface, ServerPubKey: rec.ServerPublicKey})
 
 	daemonState := "stopped"
 	tunnel := "disconnected"
@@ -570,7 +575,7 @@ func cmdLogout(e *env, args []string) int {
 	}
 
 	// Local wipe + tunnel teardown (same order regardless of force).
-	if err := engine.New(engine.Config{}).Down(); err != nil {
+	if err := engine.New(engine.Config{Iface: e.iface}).Down(); err != nil {
 		fmt.Fprintf(e.stderr, "warning: tunnel teardown failed: %s\n", err)
 	}
 	keys := e.keys()

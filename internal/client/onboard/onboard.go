@@ -89,6 +89,11 @@ func (p *Provisioner) Authenticate(c Credentials) error {
 // idempotent recovery), fetch server info, and write the state record. On failure the
 // caller may retry; on cancel call Cleanup.
 func (p *Provisioner) Provision(c Credentials, nodeName string) (state.Record, error) {
+	// Validate before authenticating (pre-031 behavior): an empty device name
+	// must not trigger sign-in side effects.
+	if nodeName == "" {
+		return state.Record{}, errors.New("device name is required")
+	}
 	if err := p.Authenticate(c); err != nil {
 		return state.Record{}, err
 	}

@@ -70,7 +70,7 @@ type Tunnel struct {
 	newEngine      func() engine // injectable for tests; default = wireguard-go
 	connectTimeout time.Duration
 	pollInterval   time.Duration
-	staleThreshold time.Duration // handshake age beyond which the link is "stale" (default 240s)
+	staleThreshold time.Duration // handshake age beyond which the link is "stale" (default 240s; mirrored by the router daemon, internal/router/daemon)
 }
 
 // New builds a Tunnel from the setup record and the device private key (base64).

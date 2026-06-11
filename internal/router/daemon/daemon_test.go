@@ -3,11 +3,14 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
 	"testing"
 	"time"
+
+	"lanweave/internal/router/engine"
 )
 
 // fakeEngine is the daemon's own seam (the real kernel engine has privileged
@@ -154,4 +157,23 @@ func TestCancelTearsDown(t *testing.T) {
 	if _, down := e.counts(); down != 1 {
 		t.Errorf("down calls = %d, want exactly 1", down)
 	}
+}
+
+// TestStaleInterfaceAdopted: an interface left over by an unclean death (Up
+// returns ErrIfaceExists) is torn down and replaced instead of looping forever
+// — the crash-respawn recovery path.
+func TestStaleInterfaceAdopted(t *testing.T) {
+	e := &fakeEngine{upErr: fmt.Errorf("wrapped: %w", engine.ErrIfaceExists), handshake: time.Now()}
+	d := testDaemon(e)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+
+	// First Up hits the stale interface; the daemon must Down it. Let the
+	// second Up succeed.
+	waitFor(t, func() bool { _, down := e.counts(); return down >= 1 })
+	e.set(func(f *fakeEngine) { f.upErr = nil })
+	waitFor(t, func() bool { up, _ := e.counts(); return up >= 2 })
+	cancel()
+	<-done
 }
