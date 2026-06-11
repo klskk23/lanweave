@@ -53,3 +53,21 @@ lanweave-routerd logout            # deregisters this device, wipes local state
 
 `logout` refuses when the server is unreachable (it would leave an orphan
 node); `logout --force` wipes locally anyway and warns.
+
+## Announcing LAN subnets (feature 032)
+
+Share a LAN behind this router with a zone — members reach your devices via a
+server-assigned "synthetic" subnet (host bits preserved: real `.50` =
+synthetic `.50`), and your LAN devices need zero configuration:
+
+```sh
+lanweave-routerd announce add 192.168.50.0/24 --zone homelab
+# announced 192.168.50.0/24 -> 100.100.X.0/24 (zone homelab, id N)
+lanweave-routerd announce list
+lanweave-routerd announce remove 192.168.50.0/24 --zone homelab
+```
+
+Translation rules live in the dedicated nftables table `lanweave_rt` (your
+fw4 config is never touched) and are rebuilt automatically from the server's
+announcement list at daemon startup and every minute — withdrawing on the
+server side converges here without manual steps. `logout` removes the table.

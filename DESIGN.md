@@ -282,7 +282,10 @@ table inet lanweave {
 > `lanweave-routerd`（单二进制 daemon + CLI 子命令；隧道用**内核 WireGuard**（wgctrl+netlink），
 > procd 守护；凭据/状态落 `/etc/lanweave/`（0600/0700）；TOFU/续期/登出/自愈语义与本章
 > 客户端逐条对齐（018/024/025/028）；首发交叉编译 amd64/arm64/mipsle）。OpenWrt 端是
-> 032 子网宣告的宣告端载体。
+> 032 子网宣告的宣告端载体：`announce add/remove/list` 驱动 030 API，本机自有 nftables 表
+> `lanweave_rt` 下发前缀 1:1 翻译（dnat prefix/NETMAP）+ 源伪装（masquerade）；该表为纯派生态，
+> 服务器宣告清单是唯一真源（daemon 启动对账重建 + 60s 周期对账 + 命令后即时重建），
+> `announce add` 具补偿原子性（本地失败→自动撤回远端挂接，不留黑洞宣告）。
 
 ### 9.1 技术栈
 - UI：**Fyne**（纯 Go）。

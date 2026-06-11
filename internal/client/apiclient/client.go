@@ -48,6 +48,15 @@ var (
 	ErrNotOwner              = errors.New("only the zone owner can do that")
 	ErrNotMember             = errors.New("not a member of that zone")
 	ErrZoneNotFound          = errors.New("zone not found")
+
+	// Subnet-announcement errors (feature 030 codes, consumed by the router
+	// announcer 032 and the consumer clients 033).
+	ErrPlatformUnsupported    = errors.New("this device's platform cannot announce subnets")
+	ErrAnnounceDisabled       = errors.New("subnet announcements are disabled on this server")
+	ErrSubnetInvalid          = errors.New("subnet rejected (must be a private IPv4 range, /16-/30, outside the server pools)")
+	ErrSubnetOverlap          = errors.New("subnet overlaps another announcement of this device")
+	ErrAnnounceLimit          = errors.New("announced subnet limit reached")
+	ErrSyntheticPoolExhausted = errors.New("no synthetic address block available")
 )
 
 // CertError reports a TLS certificate that neither matched the configured pin nor verified
@@ -304,6 +313,30 @@ func (c *Client) KickMember(name string, nodeID int64) error {
 	return err
 }
 
+// CreateAnnouncement announces a real subnet behind one of the caller's
+// devices into a zone (feature 030); the response carries the synthetic block
+// members dial.
+func (c *Client) CreateAnnouncement(zone string, nodeID int64, subnet string) (protocol.AnnouncementResponse, error) {
+	var resp protocol.AnnouncementResponse
+	_, err := c.do(http.MethodPost, "/api/v1/zones/"+url.PathEscape(zone)+"/announcements", true,
+		protocol.CreateAnnouncementRequest{NodeID: nodeID, Subnet: subnet}, &resp)
+	return resp, err
+}
+
+// DeleteAnnouncement withdraws an announcement's attachment to a zone.
+func (c *Client) DeleteAnnouncement(zone string, id int64) error {
+	_, err := c.do(http.MethodDelete,
+		fmt.Sprintf("/api/v1/zones/%s/announcements/%d", url.PathEscape(zone), id), true, nil, nil)
+	return err
+}
+
+// ListAnnouncements returns a zone's announcements (real → synthetic mappings).
+func (c *Client) ListAnnouncements(zone string) (protocol.AnnouncementListResponse, error) {
+	var resp protocol.AnnouncementListResponse
+	_, err := c.do(http.MethodGet, "/api/v1/zones/"+url.PathEscape(zone)+"/announcements", true, nil, &resp)
+	return resp, err
+}
+
 // DeleteNode removes one of the caller's own devices (used by logout). The server enforces
 // ownership, so a foreign or unknown id is a 404 (mapped to ErrZoneNotFound), never another
 // user's node. Expects 204 No Content.
@@ -414,6 +447,18 @@ func (c *Client) mapError(path string, auth bool, resp *http.Response) error {
 		return ErrZoneOrPassword
 	case "forbidden":
 		return ErrNotOwner
+	case "platform_unsupported":
+		return ErrPlatformUnsupported
+	case "announce_disabled":
+		return ErrAnnounceDisabled
+	case "subnet_invalid":
+		return ErrSubnetInvalid
+	case "subnet_overlap":
+		return ErrSubnetOverlap
+	case "announce_limit_reached":
+		return ErrAnnounceLimit
+	case "synthetic_pool_exhausted":
+		return ErrSyntheticPoolExhausted
 	}
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
