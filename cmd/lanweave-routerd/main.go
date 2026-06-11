@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+
 	"sort"
 	"strings"
 	"syscall"
@@ -25,6 +26,8 @@ import (
 	"lanweave/internal/client/state"
 	"lanweave/internal/router/daemon"
 	"lanweave/internal/router/engine"
+	"lanweave/internal/router/natctl"
+	"lanweave/internal/router/reconcile"
 
 	"log/slog"
 )
@@ -44,6 +47,45 @@ type env struct {
 	stdin    io.Reader
 	stdout   io.Writer
 	stderr   io.Writer
+	// nat is the translation-table seam (real nftables by default; tests swap a
+	// failing implementation to drive the FR-005 compensation path).
+	nat natTable
+	// reconcileEvery overrides the announcement reconcile cadence (tests).
+	reconcileEvery time.Duration
+}
+
+// natTable abstracts the local translation table (implemented by natctl).
+type natTable interface {
+	Rebuild(vpnPool netip.Prefix, rules []natctl.Rule) error
+	Teardown() error
+	Current() ([]natctl.Rule, error)
+}
+
+type realNAT struct{}
+
+func (realNAT) Rebuild(pool netip.Prefix, rules []natctl.Rule) error {
+	return natctl.Rebuild(natctl.DefaultTable, pool, rules)
+}
+func (realNAT) Teardown() error                 { return natctl.Teardown(natctl.DefaultTable) }
+func (realNAT) Current() ([]natctl.Rule, error) { return natctl.Current(natctl.DefaultTable) }
+
+func (e *env) natTable() natTable {
+	if e.nat != nil {
+		return e.nat
+	}
+	return realNAT{}
+}
+
+// defaultReconcileEvery is the announcement reconcile cadence (DESIGN §9 /
+// 032 contract: convergence within a minute; the rebuild itself is the
+// self-heal, so cycles are unconditional by design).
+const defaultReconcileEvery = 60 * time.Second
+
+func (e *env) reconcilePeriod() time.Duration {
+	if e.reconcileEvery > 0 {
+		return e.reconcileEvery
+	}
+	return defaultReconcileEvery
 }
 
 func (e *env) statePath() string   { return filepath.Join(e.dataDir, "state.json") }
@@ -68,6 +110,7 @@ commands:
   down                                           tear the tunnel interface down
   status                                         show daemon/tunnel/ip/handshake/zones
   zone create|join|leave|list|members ...        manage zones (passwords on stdin)
+  announce add|remove|list ...                   announce LAN subnets into zones
   logout           [--force]                     deregister this device and wipe local state
 `)
 }
@@ -123,6 +166,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdStatus(e)
 	case "zone":
 		return cmdZone(e, rest)
+	case "announce":
+		return cmdAnnounce(e, rest)
 	case "logout":
 		return cmdLogout(e, rest)
 	case "help", "--help", "-h":
@@ -381,16 +426,67 @@ func cmdRun(e *env) int {
 // cmdRunCtx is the daemon body with an injectable context (tests cancel it
 // instead of sending signals to the test process).
 func cmdRunCtx(e *env, ctx context.Context) int {
-	eng, _, err := e.engineFromState()
+	eng, rec, err := e.engineFromState()
 	if err != nil {
 		return e.fail("%s", err)
 	}
 	log := slog.New(slog.NewTextHandler(e.stderr, nil))
+
+	// Announcement reconcile loop (feature 032): the server's announcement list
+	// is the single source of truth; the local translation table is derived
+	// state, rebuilt at startup and every period. API failures skip the cycle
+	// (rules stay frozen — the server dataplane already gates traffic).
+	go func() {
+		reconcileOnce := func() {
+			if err := e.reconcileNAT(rec); err != nil {
+				log.Error("announcement reconcile failed; keeping current rules", "error", err.Error())
+			}
+		}
+		reconcileOnce()
+		ticker := time.NewTicker(e.reconcilePeriod())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reconcileOnce()
+			}
+		}
+	}()
+
 	d := &daemon.Daemon{Engine: eng, Log: log}
 	if err := d.Run(ctx); err != nil {
 		return e.fail("%s", err)
 	}
 	return 0
+}
+
+// reconcileNAT rebuilds the local translation table from the server's lists.
+func (e *env) reconcileNAT(rec state.Record) error {
+	c, err := e.newClient(rec)
+	if err != nil {
+		return err
+	}
+	defer e.persistTokens(c)
+	rules, _, err := e.desired(c, rec)
+	if err != nil {
+		return err
+	}
+	network, err := netip.ParsePrefix(rec.Network)
+	if err != nil {
+		return fmt.Errorf("state network %q invalid: %w", rec.Network, err)
+	}
+	return e.natTable().Rebuild(network, rules)
+}
+
+// desired fetches this node's announcements across its zones.
+func (e *env) desired(c *apiclient.Client, rec state.Record) ([]natctl.Rule, []reconcile.Entry, error) {
+	zones, err := c.ListZones()
+	if err != nil {
+		return nil, nil, err
+	}
+	return reconcile.Desired(zones.Zones, c.ListAnnouncements, rec.NodeID)
 }
 
 func cmdDown(e *env) int {
@@ -574,9 +670,12 @@ func cmdLogout(e *env, args []string) int {
 		fmt.Fprintln(e.stderr, "warning: --force leaves an orphan node on the server")
 	}
 
-	// Local wipe + tunnel teardown (same order regardless of force).
+	// Local wipe + tunnel/NAT teardown (same order regardless of force).
 	if err := engine.New(engine.Config{Iface: e.iface}).Down(); err != nil {
 		fmt.Fprintf(e.stderr, "warning: tunnel teardown failed: %s\n", err)
+	}
+	if err := e.natTable().Teardown(); err != nil {
+		fmt.Fprintf(e.stderr, "warning: translation table teardown failed: %s\n", err)
 	}
 	keys := e.keys()
 	wipeErr := errors.Join(

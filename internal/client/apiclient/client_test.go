@@ -430,3 +430,71 @@ func TestDeleteNode(t *testing.T) {
 		t.Error("delete node on 500 should return an error")
 	}
 }
+
+// TestAnnouncementErrorMapping covers the 030 announcement codes → typed errors
+// and the happy round trips of the three announcement methods (feature 032).
+func TestAnnouncementErrorMapping(t *testing.T) {
+	for _, tc := range []struct {
+		code    string
+		status  int
+		wantErr error
+	}{
+		{"platform_unsupported", http.StatusConflict, apiclient.ErrPlatformUnsupported},
+		{"announce_disabled", http.StatusServiceUnavailable, apiclient.ErrAnnounceDisabled},
+		{"subnet_invalid", http.StatusBadRequest, apiclient.ErrSubnetInvalid},
+		{"subnet_overlap", http.StatusConflict, apiclient.ErrSubnetOverlap},
+		{"announce_limit_reached", http.StatusConflict, apiclient.ErrAnnounceLimit},
+		{"synthetic_pool_exhausted", http.StatusServiceUnavailable, apiclient.ErrSyntheticPoolExhausted},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(protocol.ErrorResponse{Error: tc.code, Message: "x"})
+			}))
+			defer srv.Close()
+			c := apiclient.New(srv.URL)
+			c.SetToken("tok")
+			if _, err := c.CreateAnnouncement("home", 1, "192.168.1.0/24"); !errors.Is(err, tc.wantErr) {
+				t.Errorf("err = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+
+	// Happy paths: create echoes the mapping; list returns entries; delete 204.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost:
+			var req protocol.CreateAnnouncementRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.NodeID != 7 || req.Subnet != "192.168.1.0/24" {
+				t.Errorf("create body = %+v", req)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(protocol.AnnouncementResponse{ID: 3, NodeID: 7, Subnet: req.Subnet, Synthetic: "100.100.1.0/24"})
+		case r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(protocol.AnnouncementListResponse{
+				Announcements: []protocol.AnnouncementResponse{{ID: 3, NodeID: 7, Subnet: "192.168.1.0/24", Synthetic: "100.100.1.0/24"}},
+			})
+		case r.Method == http.MethodDelete:
+			if r.URL.Path != "/api/v1/zones/home/announcements/3" {
+				t.Errorf("delete path = %s", r.URL.Path)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+	c := apiclient.New(srv.URL)
+	c.SetToken("tok")
+	ann, err := c.CreateAnnouncement("home", 7, "192.168.1.0/24")
+	if err != nil || ann.Synthetic != "100.100.1.0/24" {
+		t.Fatalf("create = %+v (%v)", ann, err)
+	}
+	list, err := c.ListAnnouncements("home")
+	if err != nil || len(list.Announcements) != 1 {
+		t.Fatalf("list = %+v (%v)", list, err)
+	}
+	if err := c.DeleteAnnouncement("home", 3); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+}

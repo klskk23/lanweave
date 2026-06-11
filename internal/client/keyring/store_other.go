@@ -40,7 +40,26 @@ func (s *fileStore) Set(name string, secret []byte) error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return fmt.Errorf("create secrets dir: %w", err)
 	}
-	return os.WriteFile(s.path(name), secret, 0o600)
+	// Write-temp-then-rename: the router daemon's reconcile loop and a CLI
+	// command may persist tokens concurrently (feature 032); a truncate-write
+	// could tear the file for a concurrent reader.
+	tmp, err := os.CreateTemp(s.dir, "."+url.PathEscape(name)+".tmp*")
+	if err != nil {
+		return fmt.Errorf("create temp secret: %w", err)
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(secret); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), s.path(name))
 }
 
 func (s *fileStore) Get(name string) ([]byte, error) {
