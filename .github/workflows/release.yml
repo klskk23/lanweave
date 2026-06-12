@@ -143,10 +143,39 @@ jobs:
             lanweave-client-*-windows-amd64.zip
           if-no-files-found: error
 
-  # ---- Assemble the draft Release (only if both builds succeeded) --------------------------
+  # ---- Build the OpenWrt router client (features 031-033) -----------------------------------
+  build-routerd:
+    name: Build routerd (OpenWrt)
+    needs: test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Derive version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Cross-compile (amd64 / arm64 / mipsle softfloat)
+        run: make routerd-cross
+      - name: Stamp versioned names + ship the procd init script
+        run: |
+          for arch in amd64 arm64 mipsle; do
+            mv "dist/lanweave-routerd-${arch}" "dist/lanweave-routerd-${VERSION}-linux-${arch}"
+          done
+          cp packaging/openwrt/lanweave-routerd.init dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: routerd
+          path: |
+            dist/lanweave-routerd-*
+            dist/lanweave-routerd.init
+          if-no-files-found: error
+
+  # ---- Assemble the draft Release (only if all builds succeeded) ---------------------------
   release:
     name: Draft release
-    needs: [build-deb, build-windows]
+    needs: [build-deb, build-windows, build-routerd]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -158,7 +187,8 @@ jobs:
       - name: Collect assets and write SHA256SUMS
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.deb' -o -name '*-setup.exe' -o -name '*-windows-amd64.zip' \) \
+          find artifacts -type f \( -name '*.deb' -o -name '*-setup.exe' -o -name '*-windows-amd64.zip' \
+            -o -name 'lanweave-routerd-*' -o -name 'lanweave-routerd.init' \) \
             -exec cp {} release/ \;
           ( cd release && sha256sum * > SHA256SUMS )
           ls -l release
