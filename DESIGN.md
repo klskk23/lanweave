@@ -285,7 +285,10 @@ table inet lanweave {
 > 032 子网宣告的宣告端载体：`announce add/remove/list` 驱动 030 API，本机自有 nftables 表
 > `lanweave_rt` 下发前缀 1:1 翻译（dnat prefix/NETMAP）+ 源伪装（masquerade）；该表为纯派生态，
 > 服务器宣告清单是唯一真源（daemon 启动对账重建 + 60s 周期对账 + 命令后即时重建），
-> `announce add` 具补偿原子性（本地失败→自动撤回远端挂接，不留黑洞宣告）。
+> `announce add` 具补偿原子性（本地失败→自动撤回远端挂接，不留黑洞宣告）。自 033 起两端均为**消费端**：
+> 所在 zones 的他人宣告合成段动态配进本机隧道（Windows：wireguard-go IpcSet 原地替换 allowed_ips +
+> 平台路由差分，不断流不重连；OpenWrt：wgctrl ReplaceAllowedIPs + 内核路由差分，排除自己宣告防回环）；
+> 连接/启动即刷 + 60s 周期对账 + API 失败冻结；聚合双视图（routesync）两端共用保证可达集合跨端一致。
 
 ### 9.1 技术栈
 - UI：**Fyne**（纯 Go）。

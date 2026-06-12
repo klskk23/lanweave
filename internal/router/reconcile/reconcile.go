@@ -1,21 +1,20 @@
 // Package reconcile computes the announcer's desired translation state from
 // the single source of truth — the server's announcement lists — so the local
-// NAT table can be rebuilt to match (feature 032). Pure data transformation;
-// no kernel or network side effects live here.
+// NAT table can be rebuilt to match (feature 032). Since feature 033 the
+// aggregation itself lives in the shared routesync package (one fetch feeds
+// both the announcer view here and the consumer route view); this package
+// keeps the NAT-facing shape.
 package reconcile
 
 import (
-	"fmt"
 	"net/netip"
-	"sort"
 
+	"lanweave/internal/client/routesync"
 	"lanweave/internal/router/natctl"
 	"lanweave/pkg/protocol"
 )
 
-// Entry is one of this node's announcements, aggregated across zones (the
-// same announcement attached to several zones is one entry — 030 reuses the
-// synthetic block).
+// Entry is one of this node's announcements, aggregated across zones.
 type Entry struct {
 	ID        int64
 	Subnet    netip.Prefix
@@ -23,46 +22,18 @@ type Entry struct {
 	Zones     []string
 }
 
-// Desired aggregates the zones' announcement lists, keeps this node's entries,
-// dedupes by announcement id and returns both the NAT rule set and the display
-// entries. A malformed CIDR from the server is reported as an error (it would
-// mean a protocol break, not a user mistake).
+// Desired returns this node's NAT rule set and display entries (the announcer
+// view of routesync.Fetch).
 func Desired(zones []protocol.ZoneResponse, list func(zone string) (protocol.AnnouncementListResponse, error), nodeID int64) ([]natctl.Rule, []Entry, error) {
-	byID := map[int64]*Entry{}
-	for _, z := range zones {
-		resp, err := list(z.Name)
-		if err != nil {
-			return nil, nil, fmt.Errorf("list announcements for zone %s: %w", z.Name, err)
-		}
-		for _, a := range resp.Announcements {
-			if a.NodeID != nodeID {
-				continue
-			}
-			if e, ok := byID[a.ID]; ok {
-				e.Zones = append(e.Zones, z.Name)
-				continue
-			}
-			real, err := netip.ParsePrefix(a.Subnet)
-			if err != nil {
-				return nil, nil, fmt.Errorf("server sent invalid subnet %q: %w", a.Subnet, err)
-			}
-			synth, err := netip.ParsePrefix(a.Synthetic)
-			if err != nil {
-				return nil, nil, fmt.Errorf("server sent invalid synthetic %q: %w", a.Synthetic, err)
-			}
-			byID[a.ID] = &Entry{ID: a.ID, Subnet: real, Synthetic: synth, Zones: []string{z.Name}}
-		}
+	all, err := routesync.Fetch(zones, list)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	entries := make([]Entry, 0, len(byID))
-	for _, e := range byID {
-		sort.Strings(e.Zones)
-		entries = append(entries, *e)
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
-
-	rules := make([]natctl.Rule, 0, len(entries))
-	for _, e := range entries {
+	mine := routesync.Mine(all, nodeID)
+	entries := make([]Entry, 0, len(mine))
+	rules := make([]natctl.Rule, 0, len(mine))
+	for _, e := range mine {
+		entries = append(entries, Entry{ID: e.ID, Subnet: e.Subnet, Synthetic: e.Synthetic, Zones: e.Zones})
 		rules = append(rules, natctl.Rule{Synthetic: e.Synthetic, Real: e.Subnet})
 	}
 	return rules, entries, nil

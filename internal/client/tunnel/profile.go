@@ -53,6 +53,48 @@ func BuildUAPIConfig(rec state.Record, privKeyBase64 string) (string, error) {
 	return b.String(), nil
 }
 
+// BuildPeerUpdate assembles an incremental UAPI update for the (single) server
+// peer: replace its allowed_ips with the VPN network plus the given synthetic
+// blocks (feature 033 consumer routes). Carrying public_key without
+// private_key updates the existing peer in place — endpoint, keepalive and the
+// handshake state are untouched, so applying this never drops the connection.
+func BuildPeerUpdate(serverPubB64 string, network netip.Prefix, extras []netip.Prefix) (string, error) {
+	pubHex, err := keyB64ToHex(serverPubB64)
+	if err != nil {
+		return "", fmt.Errorf("server key: %w", err)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "public_key=%s\n", pubHex)
+	fmt.Fprintf(&b, "replace_allowed_ips=true\n")
+	fmt.Fprintf(&b, "allowed_ip=%s\n", network.Masked().String())
+	for _, p := range extras {
+		fmt.Fprintf(&b, "allowed_ip=%s\n", p.Masked().String())
+	}
+	return b.String(), nil
+}
+
+// routeDiff computes which prefixes must be added and removed to move the
+// applied route set from current to desired. Pure for testing.
+func routeDiff(current, desired []netip.Prefix) (add, del []netip.Prefix) {
+	cur := map[netip.Prefix]bool{}
+	for _, p := range current {
+		cur[p] = true
+	}
+	want := map[netip.Prefix]bool{}
+	for _, p := range desired {
+		want[p] = true
+		if !cur[p] {
+			add = append(add, p)
+		}
+	}
+	for _, p := range current {
+		if !want[p] {
+			del = append(del, p)
+		}
+	}
+	return add, del
+}
+
 // serverVPNIP is the server's address inside the VPN — the first usable host in the
 // network (e.g. 100.127.0.1 for 100.127.0.0/16). Used to probe reachability on connect.
 func serverVPNIP(network string) (netip.Addr, bool) {

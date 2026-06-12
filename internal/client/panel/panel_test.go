@@ -2,6 +2,7 @@ package panel_test
 
 import (
 	"errors"
+	"net/netip"
 	"path/filepath"
 	"testing"
 	"time"
@@ -38,6 +39,9 @@ type fakeAPI struct {
 	zones        protocol.ZoneListResponse
 	members      protocol.ZoneMembersResponse
 
+	announcements map[string][]protocol.AnnouncementResponse
+	announceErr   error
+
 	joinedNodeID  int64
 	kickedNodeID  int64
 	createdNodeID int64
@@ -70,6 +74,13 @@ func (f *fakeAPI) Me() (protocol.MeResponse, error) {
 func (f *fakeAPI) ListNodes() (protocol.NodeListResponse, error)            { return f.nodes, f.listNodesErr }
 func (f *fakeAPI) ListZones() (protocol.ZoneListResponse, error)            { return f.zones, nil }
 func (f *fakeAPI) ZoneMembers(string) (protocol.ZoneMembersResponse, error) { return f.members, nil }
+
+func (f *fakeAPI) ListAnnouncements(zone string) (protocol.AnnouncementListResponse, error) {
+	if f.announceErr != nil {
+		return protocol.AnnouncementListResponse{}, f.announceErr
+	}
+	return protocol.AnnouncementListResponse{Announcements: f.announcements[zone]}, nil
+}
 func (f *fakeAPI) CreateZone(_ string, nodeID int64, _ string) (protocol.ZoneResponse, error) {
 	f.createdNodeID = nodeID
 	return protocol.ZoneResponse{}, nil
@@ -610,5 +621,81 @@ func TestFirewallAllowIdempotent(t *testing.T) {
 	}
 	if !fw.open || fw.allowCalls != 2 {
 		t.Errorf("two reconciles (on ∧ connected): open=%v allow=%d, want open + 2 Allow (no duplicate open)", fw.open, fw.allowCalls)
+	}
+}
+
+var errAPI = errors.New("api down")
+
+// fakeRouteSetter records SetExtraRoutes calls; conflictOn prefixes are
+// excluded from the returned applied set (simulating local-overlap skips).
+type fakeRouteSetter struct {
+	calls      [][]netip.Prefix
+	conflictOn map[netip.Prefix]bool
+}
+
+func (f *fakeRouteSetter) SetExtraRoutes(extra []netip.Prefix) ([]netip.Prefix, error) {
+	f.calls = append(f.calls, extra)
+	var applied []netip.Prefix
+	for _, p := range extra {
+		if !f.conflictOn[p] {
+			applied = append(applied, p)
+		}
+	}
+	return applied, nil
+}
+
+// TestSyncRoutes drives the 033 consumer-route sync at the controller layer:
+// aggregation feeds the tunnel, views carry announcer/zone data, conflicts are
+// marked, an API failure freezes (no tunnel call), and a shrunken second
+// fetch propagates the shrunken set (SC-001 withdrawal, panel dimension).
+func TestSyncRoutes(t *testing.T) {
+	f := &fakeAPI{
+		zones: protocol.ZoneListResponse{Zones: []protocol.ZoneResponse{{ID: 1, Name: "home"}}},
+		announcements: map[string][]protocol.AnnouncementResponse{
+			"home": {
+				{ID: 1, NodeID: 9, NodeName: "bob-router", Subnet: "192.168.50.0/24", Synthetic: "100.100.1.0/24"},
+				{ID: 2, NodeID: 9, NodeName: "bob-router", Subnet: "10.8.0.0/24", Synthetic: "100.100.2.0/24"},
+			},
+		},
+	}
+	c, _ := newController(t, f)
+	rt := &fakeRouteSetter{conflictOn: map[netip.Prefix]bool{netip.MustParsePrefix("100.100.2.0/24"): true}}
+
+	views, err := c.SyncRoutes(rt)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(rt.calls) != 1 || len(rt.calls[0]) != 2 {
+		t.Fatalf("tunnel got %v, want both synthetic prefixes", rt.calls)
+	}
+	if len(views) != 2 {
+		t.Fatalf("views = %d, want 2", len(views))
+	}
+	if views[0].Conflict || views[0].Announcer != "bob-router" || views[0].Synthetic != "100.100.1.0/24" {
+		t.Errorf("view 0 = %+v", views[0])
+	}
+	if !views[1].Conflict {
+		t.Errorf("conflicting entry not marked: %+v", views[1])
+	}
+
+	// API failure freezes: error out, tunnel untouched.
+	f.announceErr = errAPI
+	if _, err := c.SyncRoutes(rt); err == nil {
+		t.Fatal("api failure not surfaced")
+	}
+	if len(rt.calls) != 1 {
+		t.Fatal("tunnel touched despite api failure (routes must freeze)")
+	}
+	f.announceErr = nil
+
+	// Withdrawal converges: second cycle returns a shrunken list → the tunnel
+	// receives the shrunken set.
+	f.announcements["home"] = f.announcements["home"][:1]
+	if _, err := c.SyncRoutes(rt); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	last := rt.calls[len(rt.calls)-1]
+	if len(last) != 1 || last[0] != netip.MustParsePrefix("100.100.1.0/24") {
+		t.Errorf("shrunken set not propagated: %v", last)
 	}
 }

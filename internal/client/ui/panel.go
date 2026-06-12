@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,14 +49,19 @@ type Panel struct {
 
 	healthMu    sync.Mutex    // guards healthQuit (start/stop of the health loop)
 	healthQuit  chan struct{} // stops the 15s health/auto-reconnect loop; nil when not running
-	reconnectMu sync.Mutex    // single-flights healthTick so overlapping ticks never stack
+	routesMu    sync.Mutex    // guards routesQuit + reachable (033 consumer routes)
+	routesQuit  chan struct{} // stops the 60s consumer-route sync loop; nil when not running
+	reachable   []panel.ReachableView
+	reachErr    bool       // last sync failed (display "showing last known")
+	reconnectMu sync.Mutex // single-flights healthTick so overlapping ticks never stack
 
-	menuBtn  *widget.Button
-	nodesBox *fyne.Container
-	zonesBox *fyne.Container
-	nodesTab *container.TabItem
-	zonesTab *container.TabItem
-	tabs     *container.AppTabs
+	menuBtn   *widget.Button
+	nodesBox  *fyne.Container
+	zonesBox  *fyne.Container
+	routesBox *fyne.Container
+	nodesTab  *container.TabItem
+	zonesTab  *container.TabItem
+	tabs      *container.AppTabs
 }
 
 // NewPanel builds the panel, validates the session (prompting sign-in when needed), then loads
@@ -70,8 +76,9 @@ func NewPanel(win fyne.Window, rec state.Record, tn *tunnel.Tunnel, ctrl *panel.
 func (p *Panel) build() fyne.CanvasObject {
 	p.nodesBox = container.NewVBox()
 	p.zonesBox = container.NewVBox()
+	p.routesBox = container.NewVBox()
 	p.nodesTab = container.NewTabItemWithIcon(i18n.T("panel.tabNodes"), theme.ComputerIcon(), container.NewVScroll(p.nodesBox))
-	p.zonesTab = container.NewTabItemWithIcon(i18n.T("panel.tabZones"), theme.FolderIcon(), container.NewVScroll(p.zonesBox))
+	p.zonesTab = container.NewTabItemWithIcon(i18n.T("panel.tabZones"), theme.FolderIcon(), container.NewVScroll(container.NewVBox(p.routesBox, p.zonesBox)))
 	p.tabs = container.NewAppTabs(p.nodesTab, p.zonesTab)
 	p.tabs.SetTabLocation(container.TabLocationTop)
 
@@ -327,6 +334,7 @@ func (p *Panel) onConnect() {
 		if err == nil {
 			p.tn.SetDesired(true)              // record intent ONLY on success → enables self-heal (FR-006)
 			_ = p.ctrl.ReconcileFirewall(true) // install the host rule iff opted in
+			p.syncRoutesNow()                  // consumer routes right away — no waiting for the 60s tick (033)
 		}
 		fyne.Do(func() {
 			if err != nil {
@@ -543,6 +551,8 @@ func (p *Panel) runLogout() {
 		outcome, lerr := p.ctrl.Logout()
 		if outcome == panel.LogoutDone {
 			p.stopHealth()
+			p.stopRoutes()
+			p.stopRoutes()
 			p.tn.SetDesired(false) // logged out → no self-heal of a torn-down tunnel
 			_ = p.tn.Disconnect()  // only tear the tunnel down once removal is safely done
 		}
@@ -624,6 +634,7 @@ func (p *Panel) start() {
 	p.refresh()
 	go p.pollLoop()
 	p.startHealth()
+	p.startRoutes()
 }
 
 func (p *Panel) pollLoop() {
@@ -932,4 +943,92 @@ func tunnelMessage(err error) string {
 	default:
 		return i18n.T("tunnel.errGeneric")
 	}
+}
+
+// startRoutes launches the consumer-route sync loop (feature 033): while
+// connected, the reachable announced subnets of this account's zones are
+// fetched and applied to the tunnel every minute (plus immediately after a
+// successful connect). Idempotent like startHealth.
+func (p *Panel) startRoutes() {
+	p.routesMu.Lock()
+	defer p.routesMu.Unlock()
+	if p.routesQuit != nil {
+		return
+	}
+	q := make(chan struct{})
+	p.routesQuit = q
+	go p.routesLoop(q)
+}
+
+func (p *Panel) stopRoutes() {
+	p.routesMu.Lock()
+	defer p.routesMu.Unlock()
+	if p.routesQuit != nil {
+		close(p.routesQuit)
+		p.routesQuit = nil
+	}
+}
+
+func (p *Panel) routesLoop(quit chan struct{}) {
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-quit:
+			return
+		case <-t.C:
+			p.syncRoutesNow()
+		}
+	}
+}
+
+// syncRoutesNow performs one consumer-route reconcile pass. Disconnected →
+// the display empties (routes died with the interface); an API failure keeps
+// the last known list with a stale note (routes frozen, FR-003).
+func (p *Panel) syncRoutesNow() {
+	if p.tn.State() != tunnel.Connected {
+		p.routesMu.Lock()
+		changed := len(p.reachable) > 0 || p.reachErr
+		p.reachable, p.reachErr = nil, false
+		p.routesMu.Unlock()
+		if changed {
+			fyne.Do(p.refreshRoutes)
+		}
+		return
+	}
+	views, err := p.ctrl.SyncRoutes(p.tn)
+	p.routesMu.Lock()
+	if err != nil {
+		p.reachErr = true
+	} else {
+		p.reachable, p.reachErr = views, false
+	}
+	p.routesMu.Unlock()
+	fyne.Do(p.refreshRoutes)
+}
+
+// refreshRoutes renders the "reachable announced subnets" block at the top of
+// the zones tab (hidden when empty).
+func (p *Panel) refreshRoutes() {
+	p.routesMu.Lock()
+	views := append([]panel.ReachableView(nil), p.reachable...)
+	stale := p.reachErr
+	p.routesMu.Unlock()
+
+	p.routesBox.RemoveAll()
+	if len(views) > 0 || stale {
+		p.routesBox.Add(widget.NewLabelWithStyle(i18n.T("routes.title"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
+		if stale {
+			p.routesBox.Add(coloredText(i18n.T("routes.stale"), textSecondary))
+		}
+		for _, v := range views {
+			line := fmt.Sprintf("%s  ←  %s   ·  %s  ·  %s", v.Synthetic, v.Subnet, strings.Join(v.Zones, ","), v.Announcer)
+			if v.Conflict {
+				p.routesBox.Add(coloredText(line+"   "+i18n.T("routes.conflict"), dangerColor))
+			} else {
+				p.routesBox.Add(widget.NewLabel(line))
+			}
+		}
+	}
+	p.routesBox.Refresh()
 }

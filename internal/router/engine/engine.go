@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -46,6 +48,10 @@ func (c Config) iface() string {
 // Engine drives one kernel WireGuard interface.
 type Engine struct {
 	cfg Config
+
+	routesMu      sync.Mutex // consumer-route memory (033); daemon and reconcile goroutines
+	routesWanted  []netip.Prefix
+	routesApplied []netip.Prefix
 }
 
 // New returns an engine for the given config (no kernel side effects yet).
@@ -131,6 +137,9 @@ func (e *Engine) Up() error {
 // Down removes the tunnel interface (routes and addresses die with it). It is
 // idempotent: a missing interface is success.
 func (e *Engine) Down() error {
+	e.routesMu.Lock()
+	e.routesWanted, e.routesApplied = nil, nil
+	e.routesMu.Unlock()
 	link, err := netlink.LinkByName(e.cfg.iface())
 	if err != nil {
 		return nil
@@ -190,4 +199,156 @@ func splitEndpoint(endpoint string) (net.IP, int, error) {
 		}
 	}
 	return ips[0], port, nil
+}
+
+// SetRoutes brings the consumer routes (feature 033: zone-mates' synthetic
+// blocks) to the desired set: the server peer's AllowedIPs are replaced in
+// place (UpdateOnly — endpoint/keepalive/handshake untouched) and kernel
+// routes are diffed per prefix. A prefix overlapping a local network is
+// skipped with the rest unaffected (FR-005) and retried next call. Returns
+// the prefixes actually applied. Down clears the memory.
+func (e *Engine) SetRoutes(extra []netip.Prefix) ([]netip.Prefix, error) {
+	e.routesMu.Lock()
+	defer e.routesMu.Unlock()
+
+	desired := make([]netip.Prefix, 0, len(extra))
+	seen := map[netip.Prefix]bool{}
+	for _, p := range extra {
+		m := p.Masked()
+		if !seen[m] {
+			seen[m] = true
+			desired = append(desired, m)
+		}
+	}
+	sort.Slice(desired, func(i, j int) bool { return desired[i].Addr().Less(desired[j].Addr()) })
+	if prefixesEqual(desired, e.routesWanted) && len(e.routesApplied) == len(e.routesWanted) {
+		return append([]netip.Prefix(nil), e.routesApplied...), nil
+	}
+
+	iface := e.cfg.iface()
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		return nil, fmt.Errorf("tunnel interface %s: %w", iface, err)
+	}
+
+	// Conflict gate per prefix (FR-005).
+	applied := make([]netip.Prefix, 0, len(desired))
+	for _, p := range desired {
+		if name, clash := localOverlapNot(p, iface); clash {
+			_ = name // logged by the caller's reconcile loop via applied-set diff
+			continue
+		}
+		applied = append(applied, p)
+	}
+
+	// Kernel route diff.
+	cur := map[netip.Prefix]bool{}
+	for _, p := range e.routesApplied {
+		cur[p] = true
+	}
+	want := map[netip.Prefix]bool{}
+	routed := make([]netip.Prefix, 0, len(applied))
+	for _, p := range applied {
+		want[p] = true
+		if !cur[p] {
+			if err := netlink.RouteReplace(&netlink.Route{
+				LinkIndex: link.Attrs().Index,
+				Dst:       &net.IPNet{IP: p.Addr().AsSlice(), Mask: net.CIDRMask(p.Bits(), 32)},
+			}); err != nil {
+				continue // per-prefix tolerance
+			}
+		}
+		routed = append(routed, p)
+	}
+	for _, p := range e.routesApplied {
+		if !want[p] {
+			_ = netlink.RouteDel(&netlink.Route{
+				LinkIndex: link.Attrs().Index,
+				Dst:       &net.IPNet{IP: p.Addr().AsSlice(), Mask: net.CIDRMask(p.Bits(), 32)},
+			})
+		}
+	}
+
+	// Replace the server peer's AllowedIPs in place: VPN network ∪ routed.
+	srvKey, err := wgtypes.ParseKey(e.cfg.ServerPubKey)
+	if err != nil {
+		return routed, fmt.Errorf("server key: %w", err)
+	}
+	allowed := make([]net.IPNet, 0, len(routed)+1)
+	netMasked := e.cfg.Network.Masked()
+	allowed = append(allowed, net.IPNet{IP: netMasked.Addr().AsSlice(), Mask: net.CIDRMask(netMasked.Bits(), 32)})
+	for _, p := range routed {
+		allowed = append(allowed, net.IPNet{IP: p.Addr().AsSlice(), Mask: net.CIDRMask(p.Bits(), 32)})
+	}
+	wgc, err := wgctrl.New()
+	if err != nil {
+		return routed, fmt.Errorf("wgctrl: %w", err)
+	}
+	defer wgc.Close()
+	if err := wgc.ConfigureDevice(iface, wgtypes.Config{
+		Peers: []wgtypes.PeerConfig{{
+			PublicKey:         srvKey,
+			UpdateOnly:        true,
+			ReplaceAllowedIPs: true,
+			AllowedIPs:        allowed,
+		}},
+	}); err != nil {
+		return routed, fmt.Errorf("update allowed ips: %w", err)
+	}
+
+	e.routesWanted = desired
+	e.routesApplied = routed
+	return append([]netip.Prefix(nil), routed...), nil
+}
+
+// Routes returns the consumer routes currently applied.
+func (e *Engine) Routes() []netip.Prefix {
+	e.routesMu.Lock()
+	defer e.routesMu.Unlock()
+	return append([]netip.Prefix(nil), e.routesApplied...)
+}
+
+func prefixesEqual(a, b []netip.Prefix) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// localOverlapNot reports whether the prefix overlaps a local interface
+// network other than the named tunnel interface.
+func localOverlapNot(p netip.Prefix, tunnelIface string) (string, bool) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", false
+	}
+	for _, ifc := range ifaces {
+		if ifc.Name == tunnelIface {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok || ipnet.IP.To4() == nil {
+				continue
+			}
+			ones, _ := ipnet.Mask.Size()
+			addr, ok := netip.AddrFromSlice(ipnet.IP.To4())
+			if !ok {
+				continue
+			}
+			if netip.PrefixFrom(addr, ones).Masked().Overlaps(p) {
+				return ifc.Name, true
+			}
+		}
+	}
+	return "", false
 }
