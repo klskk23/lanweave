@@ -11,6 +11,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"lanweave/internal/client/apiclient"
+	"lanweave/internal/client/routesync"
 	"lanweave/internal/client/state"
 	"lanweave/internal/router/engine"
 	"lanweave/internal/router/natctl"
@@ -41,7 +42,7 @@ func cmdAnnounce(e *env, args []string) int {
 	case "remove":
 		return cmdAnnounceRemove(e, args[1:], rec, c)
 	case "list":
-		return cmdAnnounceList(e, rec, c)
+		return cmdAnnounceList(e, args[1:], rec, c)
 	default:
 		return e.fail("unknown announce subcommand %q", args[0])
 	}
@@ -142,32 +143,97 @@ func cmdAnnounceRemove(e *env, args []string, rec state.Record, c *apiclient.Cli
 	return 0
 }
 
-func cmdAnnounceList(e *env, rec state.Record, c *apiclient.Client) int {
-	rules, entries, err := e.desired(c, rec)
+func cmdAnnounceList(e *env, args []string, rec state.Record, c *apiclient.Client) int {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	fs.SetOutput(e.stderr)
+	all := fs.Bool("all", false, "also show zone-mates' announcements this device can reach")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+
+	zones, err := c.ListZones()
 	if err != nil {
 		return e.fail("%s", friendly(err))
 	}
-	if len(entries) == 0 {
+	memberOf := routesync.MemberZones(zones.Zones, c.ZoneMembers, rec.IP)
+	entries, err := routesync.Fetch(memberOf, c.ListAnnouncements)
+	if err != nil {
+		return e.fail("%s", friendly(err))
+	}
+	mine := routesync.Mine(entries, rec.NodeID)
+	if !*all && len(mine) == 0 {
 		fmt.Fprintln(e.stdout, "no announcements")
 		return 0
+	}
+	if *all && len(entries) == 0 {
+		fmt.Fprintln(e.stdout, "no announcements")
+		return 0
+	}
+
+	rules := make([]natctl.Rule, 0, len(mine))
+	for _, en := range mine {
+		rules = append(rules, natctl.Rule{Synthetic: en.Synthetic, Real: en.Subnet})
 	}
 	current, err := e.natTable().Current()
 	if err != nil {
 		fmt.Fprintf(e.stderr, "warning: could not read local translation table (%s)\n", err)
 	}
-	inSync := err == nil && sameRules(current, rules)
+	natOK := err == nil && sameRules(current, rules)
 
 	w := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "SUBNET\tSYNTHETIC\tZONES\tRULES")
-	status := "ok"
-	if !inSync {
-		status = "pending"
+	if !*all {
+		fmt.Fprintln(w, "SUBNET\tSYNTHETIC\tZONES\tRULES")
+		for _, en := range mine {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", en.Subnet, en.Synthetic, strings.Join(en.Zones, ","), okPending(natOK))
+		}
+		_ = w.Flush()
+		return 0
 	}
+
+	fmt.Fprintln(w, "MINE\tSUBNET\tSYNTHETIC\tZONES\tANNOUNCER\tSTATUS")
 	for _, en := range entries {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", en.Subnet, en.Synthetic, strings.Join(en.Zones, ","), status)
+		if en.NodeID == rec.NodeID {
+			fmt.Fprintf(w, "yes\t%s\t%s\t%s\t(this)\t%s\n", en.Subnet, en.Synthetic, strings.Join(en.Zones, ","), okPending(natOK))
+			continue
+		}
+		status := "pending"
+		if consumerRoutePresent(e.iface, en.Synthetic) {
+			status = "routed"
+		}
+		fmt.Fprintf(w, "no\t%s\t%s\t%s\t%s\t%s\n", en.Subnet, en.Synthetic, strings.Join(en.Zones, ","), en.Announcer, status)
 	}
 	_ = w.Flush()
 	return 0
+}
+
+func okPending(ok bool) string {
+	if ok {
+		return "ok"
+	}
+	return "pending"
+}
+
+// consumerRoutePresent reports whether the synthetic block is routed via the
+// tunnel interface (the daemon's reconcile applied it).
+func consumerRoutePresent(iface string, p netip.Prefix) bool {
+	name := iface
+	if name == "" {
+		name = engine.DefaultIface
+	}
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return false
+	}
+	routes, err := netlink.RouteList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return false
+	}
+	for _, r := range routes {
+		if r.Dst != nil && r.Dst.String() == p.Masked().String() {
+			return true
+		}
+	}
+	return false
 }
 
 // rebuildFromServer recomputes the desired set and swaps the local table.

@@ -7,12 +7,15 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"net"
 	"net/netip"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -291,4 +294,273 @@ func TestIntegrationSourcePortRandomized(t *testing.T) {
 	if port1 == port2 {
 		t.Errorf("source ports identical (%d) across reconnects — listen_port appears pinned", port1)
 	}
+}
+
+// TestIntegrationSetExtraRoutes (privileged) is the 033 US1 acceptance at CI
+// level: consumer routes are hot-applied to a LIVE tunnel — allowed_ips
+// replaced in place, OS routes diffed — without dropping the connection, and
+// real traffic to a synthetic address flows. Withdrawal, idempotency, the
+// per-prefix conflict gate (FR-005) and teardown cleanliness are asserted on
+// the same live device.
+func TestIntegrationSetExtraRoutes(t *testing.T) {
+	// The server lives in a CHILD namespace: the synthetic address sits on its
+	// wg interface (pure INPUT path — no forwarding, immune to parallel
+	// packages' tables), while the user-space client tunnel must stay in the
+	// root namespace (wireguard-go does socket I/O from arbitrary goroutines).
+	tn, serverNS := nsServerTunnel(t)
+	if err := tn.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	synth := netip.MustParsePrefix("100.104.7.0/24")
+	echoAddr := "100.104.7.1:19770"
+	startUDPEchoInNS(t, serverNS, echoAddr)
+
+	// Negative baseline: without the consumer route the synthetic address is
+	// unreachable through the tunnel.
+	if udpEcho(t, echoAddr, 2) {
+		t.Fatal("synthetic address reachable before SetExtraRoutes")
+	}
+
+	hsBefore, err := tn.eng.lastHandshake()
+	if err != nil || hsBefore == 0 {
+		t.Fatalf("pre-update handshake = %d (%v)", hsBefore, err)
+	}
+
+	applied, err := tn.SetExtraRoutes([]netip.Prefix{synth})
+	if err != nil || len(applied) != 1 || applied[0] != synth {
+		t.Fatalf("SetExtraRoutes = %v (%v), want [%s]", applied, err, synth)
+	}
+
+	// allowed_ips replaced in place; route present; STILL CONNECTED with the
+	// same handshake (no reset — the no-reconnect guarantee).
+	uapi, err := tn.eng.(*wgEngine).dev.IpcGet()
+	if err != nil || !strings.Contains(uapi, "allowed_ip=100.104.7.0/24") {
+		t.Fatalf("allowed_ips not updated (%v): %q", err, uapi)
+	}
+	if tn.State() != Connected {
+		t.Fatal("connection dropped by hot update")
+	}
+	hsAfter, _ := tn.eng.lastHandshake()
+	if hsAfter < hsBefore {
+		t.Fatalf("handshake timestamp went backwards: %d -> %d", hsBefore, hsAfter)
+	}
+	if !routePresent(t, tn.InterfaceName(), synth) {
+		t.Fatal("consumer route missing from the OS table")
+	}
+
+	// Real traffic through the live tunnel to the synthetic address (SC-001).
+	if !udpEcho(t, echoAddr, 10) {
+		t.Fatal("synthetic address unreachable after SetExtraRoutes")
+	}
+
+	// Idempotency: same set again leaves the route table untouched.
+	before := routeCount(t, tn.InterfaceName())
+	if _, err := tn.SetExtraRoutes([]netip.Prefix{synth}); err != nil {
+		t.Fatalf("idempotent call: %v", err)
+	}
+	if routeCount(t, tn.InterfaceName()) != before {
+		t.Fatal("idempotent SetExtraRoutes changed the route table")
+	}
+
+	// FR-005: a prefix overlapping a local network is skipped, others applied.
+	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "lwclash0"}}); err != nil {
+		t.Fatalf("dummy: %v", err)
+	}
+	t.Cleanup(func() {
+		if l, e := netlink.LinkByName("lwclash0"); e == nil {
+			_ = netlink.LinkDel(l)
+		}
+	})
+	clashLink, _ := netlink.LinkByName("lwclash0")
+	ca, _ := netlink.ParseAddr("100.104.9.1/24")
+	_ = netlink.AddrAdd(clashLink, ca)
+	_ = netlink.LinkSetUp(clashLink)
+	clash := netip.MustParsePrefix("100.104.9.0/24")
+	applied, err = tn.SetExtraRoutes([]netip.Prefix{synth, clash})
+	if err != nil || len(applied) != 1 || applied[0] != synth {
+		t.Fatalf("conflict gate: applied = %v (%v), want only %s", applied, err, synth)
+	}
+	if !udpEcho(t, echoAddr, 5) {
+		t.Fatal("surviving route broken by the conflicting one")
+	}
+
+	// Withdrawal: shrinking to empty removes route + allowed_ip, traffic stops.
+	if _, err := tn.SetExtraRoutes(nil); err != nil {
+		t.Fatalf("withdraw: %v", err)
+	}
+	if routePresent(t, tn.InterfaceName(), synth) {
+		t.Fatal("route survived withdrawal")
+	}
+	uapi, _ = tn.eng.(*wgEngine).dev.IpcGet()
+	if strings.Contains(uapi, "allowed_ip=100.104.7.0/24") {
+		t.Fatal("allowed_ip survived withdrawal")
+	}
+	if udpEcho(t, echoAddr, 2) {
+		t.Fatal("synthetic address still reachable after withdrawal")
+	}
+
+	// Re-apply then disconnect: zero residue (interface gone takes routes).
+	if _, err := tn.SetExtraRoutes([]netip.Prefix{synth}); err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	ifName := tn.InterfaceName()
+	if err := tn.Disconnect(); err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+	if interfacePresent(ifName) {
+		t.Fatal("interface survived disconnect")
+	}
+	if got := tn.ExtraRoutes(); len(got) != 0 {
+		t.Fatalf("extra-route memory survived disconnect: %v", got)
+	}
+}
+
+func udpEcho(t *testing.T, addr string, attempts int) bool {
+	t.Helper()
+	conn, err := net.Dial("udp4", addr)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	buf := make([]byte, 16)
+	for i := 0; i < attempts; i++ {
+		_, _ = conn.Write([]byte("ping"))
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		if n, err := conn.Read(buf); err == nil && n > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func routePresent(t *testing.T, ifName string, p netip.Prefix) bool {
+	t.Helper()
+	link, err := netlink.LinkByName(ifName)
+	if err != nil {
+		return false
+	}
+	routes, err := netlink.RouteList(link, netlink.FAMILY_V4)
+	if err != nil {
+		t.Fatalf("route list: %v", err)
+	}
+	for _, r := range routes {
+		if r.Dst != nil && r.Dst.String() == p.Masked().String() {
+			return true
+		}
+	}
+	return false
+}
+
+func routeCount(t *testing.T, ifName string) int {
+	t.Helper()
+	link, err := netlink.LinkByName(ifName)
+	if err != nil {
+		return 0
+	}
+	routes, err := netlink.RouteList(link, netlink.FAMILY_V4)
+	if err != nil {
+		t.Fatalf("route list: %v", err)
+	}
+	return len(routes)
+}
+
+// nsServerTunnel builds the kernel-WireGuard server inside a child namespace
+// (reachable over a veth pair) and returns a root-ns user-space Tunnel
+// configured against it. The synthetic block 100.104.7.0/24 is addressed on
+// the server's wg interface.
+func nsServerTunnel(t *testing.T) (*Tunnel, netns.NsHandle) {
+	t.Helper()
+	testutil.RequireNetAdmin(t)
+	serverNS := testutil.NewChildNS(t)
+	rootNS, err := netns.Get()
+	if err != nil {
+		t.Fatalf("root ns: %v", err)
+	}
+	t.Cleanup(func() { _ = rootNS.Close() })
+
+	b := make([]byte, 3)
+	_, _ = rand.Read(b)
+	sfx := hex.EncodeToString(b)
+	rootVeth := "twr" + sfx
+	t.Cleanup(func() {
+		if l, e := netlink.LinkByName(rootVeth); e == nil {
+			_ = netlink.LinkDel(l)
+		}
+	})
+	testutil.ConnectNS(t, serverNS, rootNS, "tws"+sfx, "10.23.1.1/24", rootVeth, "10.23.1.2/24")
+
+	port := 18000 + int(b[0])%1000
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	clientKey, _ := wgtypes.GeneratePrivateKey()
+	clientIP := netip.MustParseAddr("100.103.0.2")
+	var serverPub string
+	if err := testutil.InNS(serverNS, func() error {
+		srvCfg := config.WireGuardConfig{Network: "100.103.0.0/16", ListenPort: port, Interface: "wgt" + sfx, MTU: 1420, Endpoint: "10.23.1.1"}
+		srvKey, _ := wgtypes.GeneratePrivateKey()
+		srv, err := wg.EnsureInterface(srvCfg, srvKey, log)
+		if err != nil {
+			return err
+		}
+		t.Cleanup(func() { _ = srv.Close() })
+		if err := srv.AddPeer(clientKey.PublicKey().String(), clientIP); err != nil {
+			return err
+		}
+		// The synthetic block, served from the server's own interface.
+		link, err := netlink.LinkByName("wgt" + sfx)
+		if err != nil {
+			return err
+		}
+		a, _ := netlink.ParseAddr("100.104.7.1/24")
+		if err := netlink.AddrAdd(link, a); err != nil {
+			return err
+		}
+		serverPub = srv.PublicKey().String()
+		return nil
+	}); err != nil {
+		t.Fatalf("ns server: %v", err)
+	}
+
+	rec := state.Record{
+		ServerURL: "https://vpn.example.com", NodeName: "laptop", IP: clientIP.String(),
+		ServerPublicKey: serverPub,
+		Endpoint:        netip.AddrPortFrom(netip.MustParseAddr("10.23.1.1"), uint16(port)).String(),
+		Network:         "100.103.0.0/16",
+	}
+	tn := New(rec, clientKey.String())
+	t.Cleanup(func() {
+		_ = tn.Close()
+		if l, e := netlink.LinkByName("lanweave0"); e == nil {
+			_ = netlink.LinkDel(l)
+		}
+	})
+	return tn, serverNS
+}
+
+// startUDPEchoInNS runs the echo responder inside the given namespace (the
+// listener socket pins its namespace at creation).
+func startUDPEchoInNS(t *testing.T, ns netns.NsHandle, addr string) {
+	t.Helper()
+	var conn *net.UDPConn
+	if err := testutil.InNS(ns, func() error {
+		ua, err := net.ResolveUDPAddr("udp4", addr)
+		if err != nil {
+			return err
+		}
+		conn, err = net.ListenUDP("udp4", ua)
+		return err
+	}); err != nil {
+		t.Fatalf("echo listen %s: %v", addr, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			n, raddr, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_, _ = conn.WriteToUDP(buf[:n], raddr)
+		}
+	}()
 }

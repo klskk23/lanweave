@@ -6,11 +6,13 @@ package panel
 
 import (
 	"errors"
+	"net/netip"
 	"time"
 
 	"lanweave/internal/client/apiclient"
 	"lanweave/internal/client/firewall"
 	"lanweave/internal/client/keyring"
+	"lanweave/internal/client/routesync"
 	"lanweave/internal/client/state"
 	"lanweave/pkg/protocol"
 )
@@ -27,6 +29,7 @@ type api interface {
 	ListNodes() (protocol.NodeListResponse, error)
 	ListZones() (protocol.ZoneListResponse, error)
 	ZoneMembers(name string) (protocol.ZoneMembersResponse, error)
+	ListAnnouncements(zone string) (protocol.AnnouncementListResponse, error)
 	CreateZone(name string, nodeID int64, password string) (protocol.ZoneResponse, error)
 	JoinZone(name string, nodeID int64, password string) error
 	LeaveZone(name string, nodeID int64) error
@@ -38,6 +41,64 @@ type api interface {
 }
 
 var _ api = (*apiclient.Client)(nil)
+
+// ReachableView is one reachable announced subnet for the panel's display
+// (feature 033): the synthetic block members dial, the real subnet behind it,
+// its zones and the announcing node.
+type ReachableView struct {
+	Synthetic string
+	Subnet    string
+	Zones     []string
+	Announcer string
+	Conflict  bool // skipped locally (overlaps a local network)
+}
+
+// RouteSetter is the tunnel-side seam for consumer routes (implemented by
+// tunnel.Tunnel.SetExtraRoutes).
+type RouteSetter interface {
+	SetExtraRoutes(extra []netip.Prefix) ([]netip.Prefix, error)
+}
+
+// SyncRoutes fetches the zones' announcements (single aggregation shared with
+// the router client — the FR-009 cross-platform guarantee), applies the
+// consumer view to the tunnel and returns the display rows. Entries whose
+// synthetic block could not be applied are marked Conflict. An API failure
+// returns the error and touches nothing (routes frozen, FR-003).
+func (c *Controller) SyncRoutes(rt RouteSetter) ([]ReachableView, error) {
+	zones, err := c.api.ListZones()
+	if err != nil {
+		return nil, err
+	}
+	// ListZones is user-scoped; membership (and the server-side AllowedIPs
+	// that make these blocks routable) is per-node — keep only the zones THIS
+	// device is in, or sibling devices' zones would blackhole (030 contract).
+	mine := routesync.MemberZones(zones.Zones, c.api.ZoneMembers, c.record.IP)
+	entries, err := routesync.Fetch(mine, c.api.ListAnnouncements)
+	if err != nil {
+		return nil, err
+	}
+	nodeID, _ := c.thisMachineNodeID() // 0 (unknown) keeps everything — Windows never announces
+	consumed := routesync.Consumed(entries, nodeID)
+	applied, err := rt.SetExtraRoutes(routesync.Prefixes(consumed))
+	if err != nil {
+		return nil, err
+	}
+	appliedSet := map[netip.Prefix]bool{}
+	for _, p := range applied {
+		appliedSet[p] = true
+	}
+	views := make([]ReachableView, 0, len(consumed))
+	for _, e := range consumed {
+		views = append(views, ReachableView{
+			Synthetic: e.Synthetic.String(),
+			Subnet:    e.Subnet.String(),
+			Zones:     e.Zones,
+			Announcer: e.Announcer,
+			Conflict:  !appliedSet[e.Synthetic],
+		})
+	}
+	return views, nil
+}
 
 // errNotRegistered means this machine's device is not in the caller's node list (so logout
 // can distinguish "already gone" from a list/network failure).

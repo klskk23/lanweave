@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 )
@@ -49,4 +50,30 @@ func teardownAdapter(ifName string) error {
 func interfacePresent(ifName string) bool {
 	_, err := netlink.LinkByName(ifName)
 	return err == nil
+}
+
+// addRoute/delRoute manage a single consumer route (feature 033) on the
+// tunnel interface.
+func addRoute(ifName string, p netip.Prefix) error {
+	link, err := netlink.LinkByName(ifName)
+	if err != nil {
+		return fmt.Errorf("find adapter %s: %w", ifName, err)
+	}
+	dst := &net.IPNet{IP: p.Masked().Addr().AsSlice(), Mask: net.CIDRMask(p.Bits(), 32)}
+	if err := netlink.RouteReplace(&netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst}); err != nil {
+		return fmt.Errorf("route %s via %s: %w", p, ifName, err)
+	}
+	return nil
+}
+
+func delRoute(ifName string, p netip.Prefix) error {
+	link, err := netlink.LinkByName(ifName)
+	if err != nil {
+		return nil // interface gone = routes gone
+	}
+	dst := &net.IPNet{IP: p.Masked().Addr().AsSlice(), Mask: net.CIDRMask(p.Bits(), 32)}
+	if err := netlink.RouteDel(&netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst}); err != nil && !strings.Contains(err.Error(), "no such") {
+		return fmt.Errorf("remove route %s: %w", p, err)
+	}
+	return nil
 }

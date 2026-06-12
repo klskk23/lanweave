@@ -17,12 +17,14 @@ import (
 
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"lanweave/internal/client/apiclient"
 	"lanweave/internal/client/keyring"
 	"lanweave/internal/client/onboard"
+	"lanweave/internal/client/routesync"
 	"lanweave/internal/client/state"
 	"lanweave/internal/router/daemon"
 	"lanweave/internal/router/engine"
@@ -436,13 +438,17 @@ func cmdRunCtx(e *env, ctx context.Context) int {
 	// is the single source of truth; the local translation table is derived
 	// state, rebuilt at startup and every period. API failures skip the cycle
 	// (rules stay frozen — the server dataplane already gates traffic).
-	go func() {
-		reconcileOnce := func() {
-			if err := e.reconcileNAT(rec); err != nil {
-				log.Error("announcement reconcile failed; keeping current rules", "error", err.Error())
-			}
+	var reconcileBusy atomic.Bool
+	reconcileOnce := func() {
+		if !reconcileBusy.CompareAndSwap(false, true) {
+			return // a reconcile is already in flight
 		}
-		reconcileOnce()
+		defer reconcileBusy.Store(false)
+		if err := e.reconcileAll(rec, eng); err != nil {
+			log.Error("announcement reconcile failed; keeping current rules and routes", "error", err.Error())
+		}
+	}
+	go func() {
 		ticker := time.NewTicker(e.reconcilePeriod())
 		defer ticker.Stop()
 		for {
@@ -455,21 +461,33 @@ func cmdRunCtx(e *env, ctx context.Context) int {
 		}
 	}()
 
-	d := &daemon.Daemon{Engine: eng, Log: log}
+	// OnUp dispatches async: a slow API call must not stall the 15s health
+	// ticks (single-flighted above; engine/natctl serialize internally).
+	d := &daemon.Daemon{Engine: eng, Log: log, OnUp: func() { go reconcileOnce() }}
 	if err := d.Run(ctx); err != nil {
 		return e.fail("%s", err)
 	}
 	return 0
 }
 
-// reconcileNAT rebuilds the local translation table from the server's lists.
-func (e *env) reconcileNAT(rec state.Record) error {
+// reconcileAll rebuilds both derived states from one fetch of the source of
+// truth: this node's announcements → the NAT table (032) and everyone else's
+// → the tunnel's consumer routes (033, own announcements excluded to avoid
+// hair-pinning).
+func (e *env) reconcileAll(rec state.Record, eng *engine.Engine) error {
 	c, err := e.newClient(rec)
 	if err != nil {
 		return err
 	}
 	defer e.persistTokens(c)
-	rules, _, err := e.desired(c, rec)
+	zones, err := c.ListZones()
+	if err != nil {
+		return err
+	}
+	// Per-node membership filter (ListZones is user-scoped; 030's AllowedIPs
+	// are per-node — see routesync.MemberZones).
+	memberOf := routesync.MemberZones(zones.Zones, c.ZoneMembers, rec.IP)
+	entries, err := routesync.Fetch(memberOf, c.ListAnnouncements)
 	if err != nil {
 		return err
 	}
@@ -477,7 +495,19 @@ func (e *env) reconcileNAT(rec state.Record) error {
 	if err != nil {
 		return fmt.Errorf("state network %q invalid: %w", rec.Network, err)
 	}
-	return e.natTable().Rebuild(network, rules)
+	mine := routesync.Mine(entries, rec.NodeID)
+	rules := make([]natctl.Rule, 0, len(mine))
+	for _, en := range mine {
+		rules = append(rules, natctl.Rule{Synthetic: en.Synthetic, Real: en.Subnet})
+	}
+	if err := e.natTable().Rebuild(network, rules); err != nil {
+		return err
+	}
+	consumed := routesync.Consumed(entries, rec.NodeID)
+	if _, err := eng.SetRoutes(routesync.Prefixes(consumed)); err != nil {
+		return fmt.Errorf("consumer routes: %w", err)
+	}
+	return nil
 }
 
 // desired fetches this node's announcements across its zones.

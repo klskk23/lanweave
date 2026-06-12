@@ -734,3 +734,237 @@ type failingNAT struct{}
 func (failingNAT) Rebuild(netip.Prefix, []natctl.Rule) error { return errors.New("nft exploded") }
 func (failingNAT) Teardown() error                           { return nil }
 func (failingNAT) Current() ([]natctl.Rule, error)           { return nil, nil }
+
+// addAnnouncer registers an "announcer router" account+node (platform=openwrt
+// — the 030 gate), joins it to the zone, announces a subnet via the API and
+// builds its kernel peer in memberNS with the SYNTHETIC address on the
+// interface (the announcer-side NETMAP translation is proven by the 032 e2e;
+// this test exercises the consumer chain end-to-end). Returns the synthetic
+// prefix and the announcement id.
+func (x *e2e) addAnnouncer(t *testing.T, zone, subnet string) (netip.Prefix, int64) {
+	t.Helper()
+	key, _ := wgtypes.GeneratePrivateKey()
+	var synth netip.Prefix
+	var annID int64
+	var serverPub string
+	x.inRouterAPI(t, func(c *apiclient.Client) error {
+		if err := c.Register(x.invite(), "carol", "Password789"); err != nil {
+			return err
+		}
+		if err := c.Login("carol", "Password789"); err != nil {
+			return err
+		}
+		node, err := c.RegisterNodePlatform("carol-router", key.PublicKey().String(), "openwrt")
+		if err != nil {
+			return err
+		}
+		if err := c.JoinZone(zone, node.ID, "zonepass-1"); err != nil {
+			return err
+		}
+		ann, err := c.CreateAnnouncement(zone, node.ID, subnet)
+		if err != nil {
+			return err
+		}
+		synth, err = netip.ParsePrefix(ann.Synthetic)
+		if err != nil {
+			return err
+		}
+		annID = ann.ID
+		info, err := c.ServerInfo()
+		if err != nil {
+			return err
+		}
+		serverPub = info.PublicKey
+		_ = node
+		return nil
+	})
+
+	if err := testutil.InNS(x.memberNS, func() error {
+		if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: "wg0"}}); err != nil {
+			return err
+		}
+		l, err := netlink.LinkByName("wg0")
+		if err != nil {
+			return err
+		}
+		// The synthetic host address: what the announcer's NETMAP would
+		// produce; members dial this directly.
+		a, _ := netlink.ParseAddr(strings.TrimSuffix(synth.Addr().String(), ".0") + ".50/32")
+		if err := netlink.AddrAdd(l, a); err != nil {
+			return err
+		}
+		wgc, err := wgctrl.New()
+		if err != nil {
+			return err
+		}
+		defer wgc.Close()
+		srvKey, err := wgtypes.ParseKey(serverPub)
+		if err != nil {
+			return err
+		}
+		keepalive := time.Second
+		_, vpnNet, _ := net.ParseCIDR(e2eVPNPool)
+		if err := wgc.ConfigureDevice("wg0", wgtypes.Config{
+			PrivateKey: &key,
+			Peers: []wgtypes.PeerConfig{{
+				PublicKey:                   srvKey,
+				Endpoint:                    &net.UDPAddr{IP: net.ParseIP("10.21.2.1"), Port: x.wgPort},
+				AllowedIPs:                  []net.IPNet{*vpnNet},
+				PersistentKeepaliveInterval: &keepalive,
+			}},
+		}); err != nil {
+			return err
+		}
+		if err := netlink.LinkSetUp(l); err != nil {
+			return err
+		}
+		_, dst, _ := net.ParseCIDR(e2eVPNPool)
+		return netlink.RouteAdd(&netlink.Route{LinkIndex: l.Attrs().Index, Dst: dst})
+	}); err != nil {
+		t.Fatalf("announcer peer: %v", err)
+	}
+	return synth, annID
+}
+
+// TestConsumerRoutes is the 033 US2 acceptance (SC-002): the router daemon's
+// reconcile pulls zone-mates' synthetic blocks into the tunnel (AllowedIPs +
+// kernel routes), real traffic reaches the announcer, the router's OWN
+// announcement is excluded (no hairpin), `announce list --all` distinguishes
+// the views, withdrawal converges within a period, and teardown leaves zero
+// residue.
+func TestConsumerRoutes(t *testing.T) {
+	x := buildAnnounceTopology(t, 0)
+	x.onboardRouterNS(t, "homelab")
+
+	synth, annID := x.addAnnouncer(t, "homelab", "10.77.0.0/24")
+	x.syncServerNFT(t)
+	echoHost := strings.TrimSuffix(synth.Addr().String(), ".0") + ".50"
+	startNSEcho(t, x.memberNS, echoHost+":9800")
+
+	cancel, done := x.startRouterDaemon(t)
+	stop := stopDaemon(cancel, done)
+	defer stop()
+
+	// ≤1 reconcile period: consumer route + AllowedIPs present, traffic flows.
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) && !consumerRoutePresent(e2eTunIface, synth) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !consumerRoutePresent(e2eTunIface, synth) {
+		t.Fatal("consumer route not applied by reconcile")
+	}
+	if !rootHasAllowedIP(t, e2eTunIface, synth) {
+		t.Fatal("synthetic block missing from server peer AllowedIPs")
+	}
+	if !rootUDPEchoPlain(t, echoHost+":9800", 10) {
+		t.Fatal("announcer's synthetic address unreachable through the tunnel (SC-002)")
+	}
+
+	// Exclusion: the router's OWN announcement must NOT become a consumer route.
+	out := x.mustRCLI(t, "", "announce", "add", "192.168.50.0/24", "--zone", "homelab")
+	ownSynth := netip.MustParsePrefix(strings.Fields(strings.SplitAfter(out, "-> ")[1])[0])
+	time.Sleep(time.Second) // > 1 reconcile period (300ms)
+	if consumerRoutePresent(e2eTunIface, ownSynth) {
+		t.Fatal("own announcement hair-pinned into the tunnel routes")
+	}
+	if rootHasAllowedIP(t, e2eTunIface, ownSynth) {
+		t.Fatal("own synthetic block leaked into AllowedIPs")
+	}
+
+	// list --all distinguishes mine vs reachable.
+	listOut := x.mustRCLI(t, "", "announce", "list", "--all")
+	if !strings.Contains(listOut, "yes") || !strings.Contains(listOut, "(this)") ||
+		!strings.Contains(listOut, "carol-router") || !strings.Contains(listOut, "routed") {
+		t.Fatalf("list --all = %q", listOut)
+	}
+
+	// Withdrawal converges within a period.
+	x.inRouterAPI(t, func(c *apiclient.Client) error {
+		if err := c.Login("carol", "Password789"); err != nil {
+			return err
+		}
+		return c.DeleteAnnouncement("homelab", annID)
+	})
+	deadline = time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) && consumerRoutePresent(e2eTunIface, synth) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if consumerRoutePresent(e2eTunIface, synth) {
+		t.Fatal("consumer route survived withdrawal")
+	}
+	if rootUDPEchoPlain(t, echoHost+":9800", 2) {
+		t.Fatal("synthetic address still reachable after withdrawal")
+	}
+
+	// Teardown: stopping the daemon downs the interface — zero residue.
+	stop()
+	if consumerRoutePresent(e2eTunIface, synth) || consumerRoutePresent(e2eTunIface, ownSynth) {
+		t.Fatal("routes survived daemon stop")
+	}
+}
+
+// startNSEcho / rootUDPEchoPlain are thin namespace/root UDP helpers.
+func startNSEcho(t *testing.T, ns netns.NsHandle, addr string) {
+	t.Helper()
+	var conn *net.UDPConn
+	if err := testutil.InNS(ns, func() error {
+		ua, err := net.ResolveUDPAddr("udp4", addr)
+		if err != nil {
+			return err
+		}
+		conn, err = net.ListenUDP("udp4", ua)
+		return err
+	}); err != nil {
+		t.Fatalf("ns echo %s: %v", addr, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			n, raddr, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_, _ = conn.WriteToUDP(buf[:n], raddr)
+		}
+	}()
+}
+
+func rootUDPEchoPlain(t *testing.T, remote string, attempts int) bool {
+	t.Helper()
+	conn, err := net.Dial("udp4", remote)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	buf := make([]byte, 16)
+	for i := 0; i < attempts; i++ {
+		_, _ = conn.Write([]byte("ping"))
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		if n, err := conn.Read(buf); err == nil && n > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func rootHasAllowedIP(t *testing.T, iface string, p netip.Prefix) bool {
+	t.Helper()
+	wgc, err := wgctrl.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wgc.Close()
+	dev, err := wgc.Device(iface)
+	if err != nil {
+		return false
+	}
+	for _, peer := range dev.Peers {
+		for _, a := range peer.AllowedIPs {
+			if a.String() == p.Masked().String() {
+				return true
+			}
+		}
+	}
+	return false
+}

@@ -18,6 +18,12 @@ type fakeEngine struct {
 	rx, tx       int64
 	upCalls      int
 	closeCalls   int
+	peerUpdates  []string // applyPeerUpdate payloads (033 consumer routes)
+}
+
+func (f *fakeEngine) applyPeerUpdate(uapi string) error {
+	f.peerUpdates = append(f.peerUpdates, uapi)
+	return nil
 }
 
 func (f *fakeEngine) up(_ string, _ netip.Addr, _ netip.Prefix) (string, error) {

@@ -39,6 +39,11 @@ type Daemon struct {
 	Engine Engine
 	Log    *slog.Logger
 	Tick   time.Duration
+	// OnUp, if set, fires after every successful tunnel bring-up (initial or
+	// self-heal rebuild) — feature 033 hooks the route/NAT reconcile here so a
+	// rebuilt tunnel regains its consumer routes immediately instead of
+	// waiting out the reconcile period.
+	OnUp func()
 }
 
 func (d *Daemon) tick() time.Duration {
@@ -99,6 +104,9 @@ func (d *Daemon) tryUp() bool {
 		return false
 	}
 	d.Log.Info("tunnel up")
+	if d.OnUp != nil {
+		d.OnUp()
+	}
 	return true
 }
 

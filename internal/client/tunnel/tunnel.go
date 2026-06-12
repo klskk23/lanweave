@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 
 	"lanweave/internal/client/state"
+	"lanweave/internal/netutil"
 )
 
 // State is the tunnel's connection state.
@@ -53,6 +55,7 @@ type engine interface {
 	handshaked() (bool, error)
 	lastHandshake() (unixSeconds int64, err error) // 0 = never handshaked; drives staleness
 	transfer() (rx, tx int64, err error)
+	applyPeerUpdate(uapi string) error // incremental IpcSet (033 consumer routes)
 	close() error
 }
 
@@ -66,6 +69,9 @@ type Tunnel struct {
 	eng              engine
 	ifName           string
 	desiredConnected bool // user intent (memory-only, never persisted); gates auto-reconnect
+
+	extraWanted  []netip.Prefix // last requested consumer route set (canonical)
+	extraApplied []netip.Prefix // subset actually routed (conflicts excluded)
 
 	newEngine      func() engine // injectable for tests; default = wireguard-go
 	connectTimeout time.Duration
@@ -228,6 +234,9 @@ func (t *Tunnel) Close() error { return t.teardown() }
 
 func (t *Tunnel) teardown() error {
 	t.mu.Lock()
+	t.extraWanted, t.extraApplied = nil, nil
+	t.mu.Unlock()
+	t.mu.Lock()
 	eng := t.eng
 	t.eng = nil
 	t.ifName = ""
@@ -286,6 +295,13 @@ func (e *wgEngine) up(cfg string, ip netip.Addr, network netip.Prefix) (string, 
 	e.dev = dev
 	e.name = name
 	return name, nil
+}
+
+func (e *wgEngine) applyPeerUpdate(uapi string) error {
+	if e.dev == nil {
+		return fmt.Errorf("device not up")
+	}
+	return e.dev.IpcSet(uapi)
 }
 
 func (e *wgEngine) lastHandshake() (int64, error) {
@@ -387,3 +403,78 @@ func (e *wgEngine) close() error {
 	e.name = ""
 	return nil
 }
+
+// SetExtraRoutes brings the tunnel's consumer routes (feature 033: synthetic
+// blocks of zone-mates' announcements) to the desired set: the server peer's
+// allowed_ips are replaced in place (no reconnect, no handshake reset) and the
+// OS routes are diffed per prefix. A prefix that overlaps a local network is
+// skipped with the rest unaffected (FR-005) and retried on the next call. It
+// returns the prefixes actually applied. While disconnected it is a no-op
+// (routes live and die with the interface).
+func (t *Tunnel) SetExtraRoutes(extra []netip.Prefix) ([]netip.Prefix, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.state != Connected || t.eng == nil {
+		return nil, nil
+	}
+
+	desired := netutil.CanonicalPrefixes(extra)
+	// Fast path: same request and everything previously wanted got applied.
+	if slices.Equal(desired, t.extraWanted) && len(t.extraApplied) == len(t.extraWanted) {
+		return append([]netip.Prefix(nil), t.extraApplied...), nil
+	}
+
+	// Per-prefix conflict gate: a synthetic block overlapping a local network
+	// is unroutable here — skip it, keep the rest (FR-005).
+	// Per-prefix conflict gate and route diff; failures skip the single prefix
+	// (FR-005) — the panel surfaces them via the returned applied set.
+	applied := make([]netip.Prefix, 0, len(desired))
+	for _, p := range desired {
+		if _, clash := netutil.LocalOverlap(p, t.ifName); !clash {
+			applied = append(applied, p)
+		}
+	}
+
+	add, del := routeDiff(t.extraApplied, applied)
+	for _, p := range del {
+		_ = delRoute(t.ifName, p) // missing route = already gone
+	}
+	addSet := map[netip.Prefix]bool{}
+	for _, p := range add {
+		addSet[p] = true
+	}
+	routed := make([]netip.Prefix, 0, len(applied))
+	for _, p := range applied {
+		if addSet[p] {
+			if err := addRoute(t.ifName, p); err != nil {
+				continue
+			}
+		}
+		routed = append(routed, p)
+	}
+
+	network, err := netip.ParsePrefix(t.rec.Network)
+	if err != nil {
+		return routed, fmt.Errorf("network %q: %w", t.rec.Network, err)
+	}
+	update, err := BuildPeerUpdate(t.rec.ServerPublicKey, network, routed)
+	if err != nil {
+		return routed, err
+	}
+	if err := t.eng.applyPeerUpdate(update); err != nil {
+		return routed, fmt.Errorf("update allowed ips: %w", err)
+	}
+
+	t.extraWanted = desired
+	t.extraApplied = routed
+	return append([]netip.Prefix(nil), routed...), nil
+}
+
+// ExtraRoutes returns the consumer routes currently applied.
+func (t *Tunnel) ExtraRoutes() []netip.Prefix {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]netip.Prefix(nil), t.extraApplied...)
+}
+
+// localPrefixOverlap reports whether the prefix overlaps a local interface
