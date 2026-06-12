@@ -69,7 +69,11 @@ func (c *Controller) SyncRoutes(rt RouteSetter) ([]ReachableView, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := routesync.Fetch(zones.Zones, c.api.ListAnnouncements)
+	// ListZones is user-scoped; membership (and the server-side AllowedIPs
+	// that make these blocks routable) is per-node — keep only the zones THIS
+	// device is in, or sibling devices' zones would blackhole (030 contract).
+	mine := routesync.MemberZones(zones.Zones, c.api.ZoneMembers, c.record.IP)
+	entries, err := routesync.Fetch(mine, c.api.ListAnnouncements)
 	if err != nil {
 		return nil, err
 	}

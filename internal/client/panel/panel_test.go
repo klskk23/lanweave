@@ -651,6 +651,10 @@ func (f *fakeRouteSetter) SetExtraRoutes(extra []netip.Prefix) ([]netip.Prefix, 
 func TestSyncRoutes(t *testing.T) {
 	f := &fakeAPI{
 		zones: protocol.ZoneListResponse{Zones: []protocol.ZoneResponse{{ID: 1, Name: "home"}}},
+		members: protocol.ZoneMembersResponse{Members: []protocol.ZoneMemberResponse{
+			{NodeID: 1, NodeName: "laptop", IP: "100.127.0.2"},
+			{NodeID: 9, NodeName: "bob-router", IP: "100.127.0.9"},
+		}},
 		announcements: map[string][]protocol.AnnouncementResponse{
 			"home": {
 				{ID: 1, NodeID: 9, NodeName: "bob-router", Subnet: "192.168.50.0/24", Synthetic: "100.100.1.0/24"},
@@ -697,5 +701,18 @@ func TestSyncRoutes(t *testing.T) {
 	last := rt.calls[len(rt.calls)-1]
 	if len(last) != 1 || last[0] != netip.MustParsePrefix("100.100.1.0/24") {
 		t.Errorf("shrunken set not propagated: %v", last)
+	}
+
+	// Per-node membership: a zone where only a SIBLING device is a member must
+	// not contribute routes (its blocks aren't in this peer's AllowedIPs).
+	f.members = protocol.ZoneMembersResponse{Members: []protocol.ZoneMemberResponse{
+		{NodeID: 9, NodeName: "bob-router", IP: "100.127.0.9"},
+	}}
+	views, err = c.SyncRoutes(rt)
+	if err != nil || len(views) != 0 {
+		t.Fatalf("sibling-only zone leaked routes: %v (%v)", views, err)
+	}
+	if last := rt.calls[len(rt.calls)-1]; len(last) != 0 {
+		t.Errorf("tunnel received routes for a non-member zone: %v", last)
 	}
 }

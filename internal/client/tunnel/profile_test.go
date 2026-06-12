@@ -151,11 +151,3 @@ func TestRouteDiff(t *testing.T) {
 		})
 	}
 }
-
-func TestCanonicalPrefixes(t *testing.T) {
-	p := func(s string) netip.Prefix { return netip.MustParsePrefix(s) }
-	got := canonicalPrefixes([]netip.Prefix{p("100.100.2.7/24"), p("100.100.1.0/24"), p("100.100.2.0/24")})
-	if len(got) != 2 || got[0] != p("100.100.1.0/24") || got[1] != p("100.100.2.0/24") {
-		t.Errorf("canonical = %v, want masked+deduped+sorted", got)
-	}
-}

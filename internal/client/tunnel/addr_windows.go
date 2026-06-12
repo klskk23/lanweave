@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"strconv"
+	"strings"
 )
 
 // configureAdapter assigns the device's VPN address to the WinTun adapter and routes the
@@ -65,8 +66,9 @@ func addRoute(ifName string, p netip.Prefix) error {
 }
 
 func delRoute(ifName string, p netip.Prefix) error {
-	if out, err := exec.Command("netsh", "interface", "ip", "delete", "route",
-		p.Masked().String(), ifName, "store=active").CombinedOutput(); err != nil {
+	out, err := exec.Command("netsh", "interface", "ip", "delete", "route",
+		p.Masked().String(), ifName, "store=active").CombinedOutput()
+	if err != nil && !strings.Contains(string(out), "not found") && !strings.Contains(string(out), "Element not found") {
 		return fmt.Errorf("delete route %s: %w (%s)", p, err, out)
 	}
 	return nil

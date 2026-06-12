@@ -155,7 +155,8 @@ func cmdAnnounceList(e *env, args []string, rec state.Record, c *apiclient.Clien
 	if err != nil {
 		return e.fail("%s", friendly(err))
 	}
-	entries, err := routesync.Fetch(zones.Zones, c.ListAnnouncements)
+	memberOf := routesync.MemberZones(zones.Zones, c.ZoneMembers, rec.IP)
+	entries, err := routesync.Fetch(memberOf, c.ListAnnouncements)
 	if err != nil {
 		return e.fail("%s", friendly(err))
 	}

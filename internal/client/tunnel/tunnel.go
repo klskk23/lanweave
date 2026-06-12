@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +16,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 
 	"lanweave/internal/client/state"
+	"lanweave/internal/netutil"
 )
 
 // State is the tunnel's connection state.
@@ -417,41 +418,35 @@ func (t *Tunnel) SetExtraRoutes(extra []netip.Prefix) ([]netip.Prefix, error) {
 		return nil, nil
 	}
 
-	desired := canonicalPrefixes(extra)
+	desired := netutil.CanonicalPrefixes(extra)
 	// Fast path: same request and everything previously wanted got applied.
-	if prefixesEqual(desired, t.extraWanted) && len(t.extraApplied) == len(t.extraWanted) {
+	if slices.Equal(desired, t.extraWanted) && len(t.extraApplied) == len(t.extraWanted) {
 		return append([]netip.Prefix(nil), t.extraApplied...), nil
 	}
 
 	// Per-prefix conflict gate: a synthetic block overlapping a local network
 	// is unroutable here — skip it, keep the rest (FR-005).
+	// Per-prefix conflict gate and route diff; failures skip the single prefix
+	// (FR-005) — the panel surfaces them via the returned applied set.
 	applied := make([]netip.Prefix, 0, len(desired))
 	for _, p := range desired {
-		if iface, clash := localPrefixOverlap(p, t.ifName); clash {
-			t.log("consumer route %s overlaps local network on %s; skipped", p, iface)
-			continue
+		if _, clash := netutil.LocalOverlap(p, t.ifName); !clash {
+			applied = append(applied, p)
 		}
-		applied = append(applied, p)
 	}
 
 	add, del := routeDiff(t.extraApplied, applied)
 	for _, p := range del {
-		if err := delRoute(t.ifName, p); err != nil {
-			t.log("remove consumer route %s: %v", p, err)
-		}
+		_ = delRoute(t.ifName, p) // missing route = already gone
+	}
+	addSet := map[netip.Prefix]bool{}
+	for _, p := range add {
+		addSet[p] = true
 	}
 	routed := make([]netip.Prefix, 0, len(applied))
 	for _, p := range applied {
-		inAdd := false
-		for _, a := range add {
-			if a == p {
-				inAdd = true
-				break
-			}
-		}
-		if inAdd {
+		if addSet[p] {
 			if err := addRoute(t.ifName, p); err != nil {
-				t.log("add consumer route %s: %v; skipped", p, err)
 				continue
 			}
 		}
@@ -482,76 +477,4 @@ func (t *Tunnel) ExtraRoutes() []netip.Prefix {
 	return append([]netip.Prefix(nil), t.extraApplied...)
 }
 
-func (t *Tunnel) log(format string, args ...any) {
-	// The tunnel has no logger today; consumer-route notes ride the panel's
-	// status surface via ExtraRoutes/applied-set comparison. Hook point kept
-	// in one place should a logger arrive.
-	_ = format
-	_ = args
-}
-
-// canonicalPrefixes masks, dedupes and sorts.
-func canonicalPrefixes(in []netip.Prefix) []netip.Prefix {
-	seen := map[netip.Prefix]bool{}
-	out := make([]netip.Prefix, 0, len(in))
-	for _, p := range in {
-		m := p.Masked()
-		if !seen[m] {
-			seen[m] = true
-			out = append(out, m)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Addr() != out[j].Addr() {
-			return out[i].Addr().Less(out[j].Addr())
-		}
-		return out[i].Bits() < out[j].Bits()
-	})
-	return out
-}
-
-func prefixesEqual(a, b []netip.Prefix) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // localPrefixOverlap reports whether the prefix overlaps a local interface
-// network other than the tunnel itself (stdlib — works on every platform).
-func localPrefixOverlap(p netip.Prefix, tunnelIface string) (string, bool) {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return "", false
-	}
-	for _, ifc := range ifaces {
-		if ifc.Name == tunnelIface {
-			continue
-		}
-		addrs, err := ifc.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			ipnet, ok := a.(*net.IPNet)
-			if !ok || ipnet.IP.To4() == nil {
-				continue
-			}
-			ones, _ := ipnet.Mask.Size()
-			addr, ok := netip.AddrFromSlice(ipnet.IP.To4())
-			if !ok {
-				continue
-			}
-			local := netip.PrefixFrom(addr, ones).Masked()
-			if local.Overlaps(p) {
-				return ifc.Name, true
-			}
-		}
-	}
-	return "", false
-}

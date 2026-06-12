@@ -552,7 +552,6 @@ func (p *Panel) runLogout() {
 		if outcome == panel.LogoutDone {
 			p.stopHealth()
 			p.stopRoutes()
-			p.stopRoutes()
 			p.tn.SetDesired(false) // logged out → no self-heal of a torn-down tunnel
 			_ = p.tn.Disconnect()  // only tear the tunnel down once removal is safely done
 		}
@@ -712,6 +711,7 @@ func (p *Panel) healthTick(now time.Time) {
 	err := p.tn.Connect()
 	if err == nil && p.tn.Desired() {
 		_ = p.ctrl.ReconcileFirewall(true)
+		p.syncRoutesNow() // self-heal reconnect regains consumer routes immediately (033, mirrors onConnect)
 	} else {
 		_ = p.ctrl.ReconcileFirewall(false) // failed, or the user disconnected mid-attempt
 	}

@@ -110,3 +110,27 @@ func TestFetchErrors(t *testing.T) {
 		t.Fatal("malformed subnet accepted")
 	}
 }
+
+// TestMemberZones: only zones containing THIS node (by VPN IP) survive —
+// user-scoped ListZones must not leak sibling devices' zones into the
+// consumer view (the per-node AllowedIPs contract, 030).
+func TestMemberZones(t *testing.T) {
+	members := func(zone string) (protocol.ZoneMembersResponse, error) {
+		switch zone {
+		case "mine":
+			return protocol.ZoneMembersResponse{Members: []protocol.ZoneMemberResponse{
+				{NodeID: 5, IP: "100.127.0.5"}, {NodeID: 7, IP: "100.127.0.7"},
+			}}, nil
+		case "siblings-only":
+			return protocol.ZoneMembersResponse{Members: []protocol.ZoneMemberResponse{
+				{NodeID: 7, IP: "100.127.0.7"},
+			}}, nil
+		default:
+			return protocol.ZoneMembersResponse{}, errors.New("api down")
+		}
+	}
+	got := routesync.MemberZones(zones("mine", "siblings-only", "flaky"), members, "100.127.0.5")
+	if len(got) != 1 || got[0].Name != "mine" {
+		t.Fatalf("member zones = %v, want only [mine]", got)
+	}
+}

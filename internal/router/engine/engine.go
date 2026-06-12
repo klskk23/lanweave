@@ -10,13 +10,15 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
+
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+	"lanweave/internal/netutil"
 )
 
 // DefaultIface is the fixed tunnel interface name on the router.
@@ -211,17 +213,8 @@ func (e *Engine) SetRoutes(extra []netip.Prefix) ([]netip.Prefix, error) {
 	e.routesMu.Lock()
 	defer e.routesMu.Unlock()
 
-	desired := make([]netip.Prefix, 0, len(extra))
-	seen := map[netip.Prefix]bool{}
-	for _, p := range extra {
-		m := p.Masked()
-		if !seen[m] {
-			seen[m] = true
-			desired = append(desired, m)
-		}
-	}
-	sort.Slice(desired, func(i, j int) bool { return desired[i].Addr().Less(desired[j].Addr()) })
-	if prefixesEqual(desired, e.routesWanted) && len(e.routesApplied) == len(e.routesWanted) {
+	desired := netutil.CanonicalPrefixes(extra)
+	if slices.Equal(desired, e.routesWanted) && len(e.routesApplied) == len(e.routesWanted) {
 		return append([]netip.Prefix(nil), e.routesApplied...), nil
 	}
 
@@ -234,8 +227,7 @@ func (e *Engine) SetRoutes(extra []netip.Prefix) ([]netip.Prefix, error) {
 	// Conflict gate per prefix (FR-005).
 	applied := make([]netip.Prefix, 0, len(desired))
 	for _, p := range desired {
-		if name, clash := localOverlapNot(p, iface); clash {
-			_ = name // logged by the caller's reconcile loop via applied-set diff
+		if _, clash := netutil.LocalOverlap(p, iface); clash {
 			continue
 		}
 		applied = append(applied, p)
@@ -308,47 +300,4 @@ func (e *Engine) Routes() []netip.Prefix {
 	return append([]netip.Prefix(nil), e.routesApplied...)
 }
 
-func prefixesEqual(a, b []netip.Prefix) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // localOverlapNot reports whether the prefix overlaps a local interface
-// network other than the named tunnel interface.
-func localOverlapNot(p netip.Prefix, tunnelIface string) (string, bool) {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return "", false
-	}
-	for _, ifc := range ifaces {
-		if ifc.Name == tunnelIface {
-			continue
-		}
-		addrs, err := ifc.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			ipnet, ok := a.(*net.IPNet)
-			if !ok || ipnet.IP.To4() == nil {
-				continue
-			}
-			ones, _ := ipnet.Mask.Size()
-			addr, ok := netip.AddrFromSlice(ipnet.IP.To4())
-			if !ok {
-				continue
-			}
-			if netip.PrefixFrom(addr, ones).Masked().Overlaps(p) {
-				return ifc.Name, true
-			}
-		}
-	}
-	return "", false
-}

@@ -17,6 +17,7 @@ import (
 
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -437,7 +438,12 @@ func cmdRunCtx(e *env, ctx context.Context) int {
 	// is the single source of truth; the local translation table is derived
 	// state, rebuilt at startup and every period. API failures skip the cycle
 	// (rules stay frozen — the server dataplane already gates traffic).
+	var reconcileBusy atomic.Bool
 	reconcileOnce := func() {
+		if !reconcileBusy.CompareAndSwap(false, true) {
+			return // a reconcile is already in flight
+		}
+		defer reconcileBusy.Store(false)
 		if err := e.reconcileAll(rec, eng); err != nil {
 			log.Error("announcement reconcile failed; keeping current rules and routes", "error", err.Error())
 		}
@@ -455,7 +461,9 @@ func cmdRunCtx(e *env, ctx context.Context) int {
 		}
 	}()
 
-	d := &daemon.Daemon{Engine: eng, Log: log, OnUp: reconcileOnce}
+	// OnUp dispatches async: a slow API call must not stall the 15s health
+	// ticks (single-flighted above; engine/natctl serialize internally).
+	d := &daemon.Daemon{Engine: eng, Log: log, OnUp: func() { go reconcileOnce() }}
 	if err := d.Run(ctx); err != nil {
 		return e.fail("%s", err)
 	}
@@ -476,7 +484,10 @@ func (e *env) reconcileAll(rec state.Record, eng *engine.Engine) error {
 	if err != nil {
 		return err
 	}
-	entries, err := routesync.Fetch(zones.Zones, c.ListAnnouncements)
+	// Per-node membership filter (ListZones is user-scoped; 030's AllowedIPs
+	// are per-node — see routesync.MemberZones).
+	memberOf := routesync.MemberZones(zones.Zones, c.ZoneMembers, rec.IP)
+	entries, err := routesync.Fetch(memberOf, c.ListAnnouncements)
 	if err != nil {
 		return err
 	}

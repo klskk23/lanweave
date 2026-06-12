@@ -100,3 +100,27 @@ func Prefixes(entries []Entry) []netip.Prefix {
 	}
 	return out
 }
+
+// MemberZones filters the zone list down to the zones THIS node is actually a
+// member of, identified by its VPN address. ListZones is user-scoped (the
+// union across all the account's devices), but zone membership — and the
+// server-side peer AllowedIPs that make synthetic blocks routable — is
+// per-node (030): routing another device's zones would blackhole at the
+// server. A members lookup failing skips that zone for this cycle (frozen,
+// like every other API failure).
+func MemberZones(zones []protocol.ZoneResponse, members func(zone string) (protocol.ZoneMembersResponse, error), selfIP string) []protocol.ZoneResponse {
+	var out []protocol.ZoneResponse
+	for _, z := range zones {
+		resp, err := members(z.Name)
+		if err != nil {
+			continue
+		}
+		for _, m := range resp.Members {
+			if m.IP == selfIP {
+				out = append(out, z)
+				break
+			}
+		}
+	}
+	return out
+}
